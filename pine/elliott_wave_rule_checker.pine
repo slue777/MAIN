@@ -488,12 +488,6 @@ f_volAvg(int b1, int b2) =>
     [s, n] = f_volSum(b1, b2)
     n > 0 ? s / n : float(na)
 
-//  the volume guideline: wave 3 almost always carries the greatest volume, so a fifth that
-//  matches it means a fifth wave extension is in force.  Returns [wave 5 lighter, extension].
-f_volVerdict(float v5, float v3) =>
-    bool known = not na(v5) and not na(v3)
-    [known and v5 < v3, known and v5 >= v3]
-
 //  "beyond" in the direction of the count: px has passed lvl going the way dir points
 f_beyond(float px, float lvl, int dir) => not na(px) and not na(lvl) and (px - lvl) * dir > 0
 
@@ -544,6 +538,7 @@ var bool  w4Tri  = false
 var float w4TriW = na
 var bool  volExt = false
 var float v3Avg  = na
+var float v5Avg  = na
 
 strictR1 = i_rule1 == "Wave 3 must be the LONGEST"
 
@@ -582,7 +577,7 @@ f_shape(float a0, float a1, float a2, float a3, float a4, float a5, int dir, boo
     if ok and not na(a4)
         ok := (a4 - a3) * dir < 0
     if ok and not na(a5)
-        ok := (a5 - a4) * dir > 0 and (allowTrunc or not f_isTrunc(a3, a5, dir))
+        ok := f_beyond(a5, a4, dir) and (allowTrunc or f_beyond(a5, a3, dir))
     ok
 
 //  DIAGONAL geometry.  Same alternation and the same "wave 3 travels beyond wave 1",
@@ -809,15 +804,10 @@ if zzNew
         w4TriW := triW
         //  GUIDELINE · VOLUME - wave 3 almost always carries the greatest volume.
         //  Equal or greater volume in wave 5 means a fifth wave extension is in force.
-        G5 := false
-        volExt := false
-        //  wave 3's average is fixed once its ends are known; wave 5 is judged here only when
-        //  it has finished - while it runs, the live block below keeps it current
+        //  wave 3's average is fixed once its ends are known; wave 5's is measured here only
+        //  when it has finished - while it runs, the live block below keeps it current
         v3Avg := i_gVol and not na(x2) and not na(x3) ? f_volAvg(x2, x3) : float(na)
-        if not na(x4) and not na(x5) and not na(v3Avg) and v3Avg > 0
-            [g5, ext] = f_volVerdict(f_volAvg(x4, x5), v3Avg)
-            G5     := g5
-            volExt := ext
+        v5Avg := not na(x4) and not na(x5) and v3Avg > 0 ? f_volAvg(x4, x5) : float(na)
         //  the corrective pattern, classified from wave A's subdivision
         corrKind := ""
         if i_corOn and not na(pA) and not na(p5) and not na(pB)
@@ -876,10 +866,10 @@ w5_cap = wStage == 4 ? f_capPx(p4, f_r1MaxL5(f_len(p0, p1), f_len(p2, p3)), wDir
 //  One place decides it; the live kill, the alternate-count panel and its tooltip all read it.
 //  While wave 4 runs (stage 3) the form is not known yet: with diagonals on, an overlap of
 //  wave 1 still leaves a diagonal open and only passing the end of wave 2 leaves nothing.
-w4DiagLim = isDiag or (wStage == 3 and i_diagOn)
-w4Run = wStage == 3 or wStage == 4
+w4Run     = wStage == 3 or wStage == 4
+w4DiagLim = w4Run and (isDiag or (wStage == 3 and i_diagOn))
 [killPx, killWhy, killMsg, killTip] = switch
-    w4Run and w4DiagLim => [p2, "④ may not pass the end of ②", isDiag ? "DIAGONAL BROKEN · wave 4 travelled beyond the end of wave 2" : "RULE 3 BROKEN · wave 4 passed the end of wave 2 - neither an impulse nor a diagonal", "Wave 4 of a diagonal is allowed to overlap wave 1 — that overlap is what makes it a diagonal. It may never travel beyond the end of wave 2. If it does, neither the impulse nor the diagonal reading survives."]
+    w4DiagLim => [p2, "④ may not pass the end of ②", isDiag ? "DIAGONAL BROKEN · wave 4 travelled beyond the end of wave 2" : "RULE 3 BROKEN · wave 4 passed the end of wave 2 - neither an impulse nor a diagonal", "Wave 4 of a diagonal is allowed to overlap wave 1 — that overlap is what makes it a diagonal. It may never travel beyond the end of wave 2. If it does, neither the impulse nor the diagonal reading survives."]
     w4Run and i_rule3 => [p1, "rule 3 · ④ may not enter ①", "RULE 3 BROKEN · wave 4 overlapped wave 1's price territory", "Wave 4 may not enter the price territory of wave 1. The moment it does, this is not an impulse and the whole count has to be redrawn."]
     inProg and i_rule2 => [p0, "rule 2 · ② may not pass ①'s start", "RULE 2 BROKEN · wave 2 surpassed the start of wave 1", "Wave 2 may never retrace more than one hundred percent of wave 1. Trading past the start of wave 1 kills the count outright."]
     => [float(na), "", "", ""]
@@ -921,10 +911,11 @@ if wStage == 4 and i_gVol and not cntDeadNow and not na(x4) and bar_index > x4
     else
         v5Sum  += nz(volume)
         v5N    += 1
-    if not na(v3Avg) and v3Avg > 0 and v5N > 0
-        [g5, ext] = f_volVerdict(v5Sum / v5N, v3Avg)
-        G5     := g5
-        volExt := ext
+    if v3Avg > 0 and v5N > 0
+        v5Avg := v5Sum / v5N
+//  the verdict, from whichever wave 5 average is current (no average = no verdict)
+G5     := v5Avg < v3Avg
+volExt := v5Avg >= v3Avg
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
 //  THE FOUR FIBONACCI TOOLS  ·  exactly the anchors the model uses
@@ -1092,7 +1083,10 @@ gKnW5  = wStage >= 5                 //  ❶ W5 ≈ W1 and ❹ equality need a f
 gKnW4  = wStage >= 4                 //  ❷ alternation needs wave 4
 gKnABC = wStage >= 8                 //  ❸ ABC depth needs wave C
 gKnVol = wStage >= 4 and i_gVol      //  ❺ volume needs wave 5 under way
-gKnown = (gKnW5 ? 2 : 0) + (gKnW4 ? 1 : 0) + (gKnABC ? 1 : 0) + (gKnVol ? 1 : 0)
+gKn    = array.from(gKnW5, gKnW4, gKnABC, gKnW5, gKnVol)   //  ❶ ❷ ❸ ❹ ❺, read by the panel too
+int gKnown = 0
+for k in gKn
+    gKnown += k ? 1 : 0
 gOk    = gMet >= math.min(i_gReq, gKnown)
 
 w2InZone = not na(w2Depth) and w2Depth >= math.min(i_w2Lo, i_w2Hi) * 0.75 and w2Depth <= i_w2Max
@@ -1412,7 +1406,7 @@ if barstate.islast
         if i_zoneBox
             if wStage == 2 and not na(z2Top) and not na(z2Bot) and not na(x1)
                 array.push(dyX, box.new(x1, z2Top, bar_index + i_rightExt, z2Bot, border_color = color.new(upL ? cDemand : cSupply, 35), border_width = 1, bgcolor = color.new(upL ? cDemand : cSupply, 84), text = "WAVE ② ZONE  ·  " + str.tostring(i_w2Lo, "#.0") + " - " + str.tostring(i_w2Hi, "#.0") + " % of wave 1", text_color = color.new(upL ? cDemand : cSupply, 0), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_center))
-            if (wStage == 3 or wStage == 4) and not na(z4Top) and not na(z4Bot) and not na(x3)
+            if w4Run and not na(z4Top) and not na(z4Bot) and not na(x3)
                 array.push(dyX, box.new(x3, z4Top, bar_index + i_rightExt, z4Bot, border_color = color.new(upL ? cDemand : cSupply, 35), border_width = 1, bgcolor = color.new(upL ? cDemand : cSupply, 84), text = "WAVE ④ ZONE  ·  " + str.tostring(i_w4Lo, "#.0") + " - " + str.tostring(i_w4Hi, "#.0") + " % of wave 3", text_color = color.new(upL ? cDemand : cSupply, 0), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_center))
                 if i_showAvg and not na(w4_avgA) and not na(w4_avgB)
                     array.push(dyX, box.new(x3, math.max(w4_avgA, w4_avgB), bar_index + i_rightExt, math.min(w4_avgA, w4_avgB), border_color = color.new(cCyan, 60), border_width = 1, bgcolor = color.new(cCyan, 92), text = "30 - 40 %  average", text_color = color.new(cCyan, 20), text_size = size.tiny, text_halign = text.align_left, text_valign = text.align_center))
@@ -1700,7 +1694,6 @@ if i_panOn and barstate.islast
     table.merge_cells(pan, 0, rGuiHdr, 7, rGuiHdr)
     gTxt = array.from("❶ W5 ≈ W1 in length", "❷ Alternation   " + (t2Kind == "" ? "" : str.substring(t2Kind, 0, 1) + " / " + (t4Kind == "" ? "?" : str.substring(t4Kind, 0, 1))), "❸ ABC ends at the W4 extreme", "❹ Equality of two motive waves", "❺ Volume  W5 < W3" + (volExt ? "   EXT!" : ""))
     gVal = array.from(G1, G2, G3, G4, G5)
-    gKn  = array.from(gKnW5, gKnW4, gKnABC, gKnW5, gKnVol)
     for r = 0 to 4
         table.cell(pan, 0, rGuiHdr + 1 + r, array.get(gTxt, r), text_color = cTxt, text_size = size.tiny, bgcolor = cPanel, text_halign = text.align_left)
         table.merge_cells(pan, 0, rGuiHdr + 1 + r, 5, rGuiHdr + 1 + r)
