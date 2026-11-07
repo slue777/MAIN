@@ -28,6 +28,24 @@
 //  v4 - Two-degree engine: subwave counting, diagonals, truncation, corrective patterns,
 //       channeling, equality / depth / volume guidelines, alternate count, wave degrees.
 //       Rule 1 now defaults to the canonical reading "wave 3 is never the shortest".
+//  v5 - Red-team fixes:
+//       · live invalidation only runs while a count is IN PROGRESS (stages 2-4) and it LATCHES -
+//         a finished impulse or diagonal reaching its own target is no longer called "invalid",
+//         a dead count cannot be resurrected by a close back inside, INVALID fires once
+//       · new stage 3 (1-2-3 done, wave 4 running) - the wave 4 zone and the 1-3 channel are
+//         now on the chart WHILE wave 4 forms, not after it has ended
+//       · rule 1 ceiling: when wave 3 is shorter than wave 1 (or "must be longest" is on) wave 5
+//         may not outrun wave 3 - trade 2 targets are capped and a close beyond it kills the count
+//       · trades closed by an invalidation are counted and sent as CLOSE; break-even move and
+//         break-even exit are separate webhook events; same-bar break-even arming is conservative
+//       · guidelines required for a signal count only the guidelines knowable at that stage
+//       · expanded / running flats are reachable (B may exceed the wave 5 extreme up to 138.2 % of A)
+//       · triangles: the a-wave is part of the width, and a triangle wave 4 is not flagged as a
+//         forbidden five; truncation requires a five-wave fifth; diagonals without a resolved
+//         wave 1 are labelled DIAGONAL instead of defaulting to ENDING
+//       · subwave counts that come out even are reported as "?" instead of being rounded down
+//       · zone-tap fills are priced at a level that actually traded, C trades cannot re-fire,
+//         the volume guideline is updated live during wave 5, webhook text fields are escaped
 indicator("Elliott Wave Rule Checker", "EW RULE CHECKER", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, max_bars_back = 3000)
 
 var string G_ENG = "① WAVE ENGINE  ·  how the count is built"
@@ -76,7 +94,7 @@ i_rule1   = input.string("Wave 3 must not be the SHORTEST", "Rule 1", options = 
 i_r1log   = input.bool(false, "Measure rule 1 in percent instead of points", group = G_RUL, tooltip = "The rule is satisfied as long as wave 3 undergoes a greater PERCENTAGE movement than wave 1 or wave 5. On small degrees points and percent give the same answer; on weekly and monthly charts they do not. Switch this on for long term counts.")
 i_rule2   = input.bool(true, "Rule 2 · wave 2 must not surpass the start of wave 1", group = G_RUL)
 i_rule3   = input.bool(true, "Rule 3 · wave 4 cannot overlap wave 1's price territory", group = G_RUL, tooltip = "This rule holds for impulses. It does NOT hold for diagonals - there the overlap is the defining feature, not a violation. Enable the diagonal engine below and the count is re-read as a diagonal instead of being thrown away.")
-i_killInv = input.bool(true, "Kill the count the moment a rule breaks", group = G_RUL, tooltip = "The source is explicit: if any of these rules is violated the count is NOT valid. With this on, a live break of rule 2 or rule 3 cancels any open setup and the next pivot starts a fresh count.")
+i_killInv = input.bool(true, "Kill the count the moment a rule breaks", group = G_RUL, tooltip = "The source is explicit: if any of these rules is violated the count is NOT valid. With this on, a close that breaks rule 1, 2 or 3 while the count is still unfolding (waves 3, 4 or 5 running) kills it for good: open setups are cancelled, an open trade is closed, and only a count with a new origin can arm again.\n\nA FINISHED impulse or diagonal is not checked any more - the correction that follows is allowed, and expected, to travel back through those levels.")
 i_showInv = input.bool(true, "Tag the invalidation on the chart", group = G_RUL)
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -95,7 +113,7 @@ i_sharpD = input.float(50.0, "A correction is SHARP from this retracement depth 
 i_sharpT = input.float(0.6, "…or when it takes less than this share of the impulse's time", minval = 0.1, maxval = 2.0, step = 0.1, group = G_GUI)
 i_gDepth = input.bool(true, "Depth guideline · target the wave 4 of one lesser degree", group = G_GUI, tooltip = "The primary guideline for how far a correction travels: corrections, and fourth waves in particular, tend to bottom inside the span of the previous fourth wave of one lesser degree, most commonly right at its terminus.\n\nThe engine finds that level for you: it is the last counter-trend swing inside wave 3.")
 i_gVol   = input.bool(true, "Volume guideline · watch for a fifth wave extension", group = G_GUI, tooltip = "Of the impulse waves, wave 3 almost always carries the greatest volume. If volume in the advancing fifth wave is equal to or greater than in the third, a fifth wave extension is in force - and that changes the target.")
-i_gReq   = input.int(0, "Guidelines required for a signal", minval = 0, maxval = 5, group = G_GUI, tooltip = "0 = guidelines are informational only, which is what they are: guidelines, not rules. Raise it if you only want the textbook counts.")
+i_gReq   = input.int(0, "Guidelines required for a signal", minval = 0, maxval = 5, group = G_GUI, tooltip = "0 = guidelines are informational only, which is what they are: guidelines, not rules. Raise it if you only want the textbook counts.\n\nOnly guidelines that can already be judged count: at the wave 3 entry none can (so the requirement is waived there), at the wave 5 entry alternation and volume can. The requirement is capped at the number that is knowable at that stage.")
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
 //  ④ FIBONACCI
@@ -400,15 +418,17 @@ f_legs(int b1, int b2) =>
             int bb = array.get(sB, k)
             if bb > b1 and bb < b2
                 c := c + 1
-    //  n interior pivots means n+1 sub-legs; the count has to come out odd
-    int n = c + 1
-    n % 2 == 0 ? n - 1 : n
+    //  n interior pivots means n+1 sub-legs.  An honest leg comes out odd; an even count
+    //  means the fine pivots do not line up with the coarse endpoints, and that is
+    //  reported as such instead of being rounded into a verdict.
+    c + 1
 
 //  the verdict:  "5" motive · "3" corrective · "7" a double three or double zigzag
 //  "5+" an extension  ·  "·" the leg is too small for this degree to resolve
+//  "?" the fine and coarse pivots are misaligned - no verdict
 f_sub(int b1, int b2) =>
     int n = i_subOn ? f_legs(b1, b2) : 0
-    n <= 1 ? "·" : n == 3 ? "3" : n == 5 ? "5" : n == 7 ? "7" : n >= 9 ? "5+" : "·"
+    n <= 1 ? "·" : n % 2 == 0 ? "?" : n == 3 ? "3" : n == 5 ? "5" : n == 7 ? "7" : "5+"
 
 f_isFive(string v)  => v == "5" or v == "5+"
 f_isThree(string v) => v == "3" or v == "7"
@@ -426,10 +446,11 @@ f_sub4(int b1, int b2, int dir) =>
     v
 
 //  is the leg a contracting five-swing triangle?  returns [isTriangle, widest width]
-f_triCheck(int b1, int b2) =>
+//  a0 is the price the leg starts from (the end of wave 3) - the start of triangle wave a
+f_triCheck(int b1, int b2, float a0) =>
     bool ok = false
     float wide = na
-    if i_triOn and i_subOn and not na(b1) and not na(b2) and b2 > b1 and array.size(sB) > 2
+    if i_triOn and i_subOn and not na(b1) and not na(b2) and not na(a0) and b2 > b1 and array.size(sB) > 2
         array<float> tv = array.new_float()
         for k = 0 to array.size(sB) - 1
             int bb = array.get(sB, k)
@@ -437,13 +458,16 @@ f_triCheck(int b1, int b2) =>
                 array.push(tv, array.get(sP, k))
         //  a-b-c-d-e needs four interior pivots
         if array.size(tv) == 4
+            //  wave a runs from the start of the leg to the first interior pivot - it is the
+            //  widest part of a contracting triangle and has to be part of the measurement
+            float s0 = math.abs(a0 - array.get(tv, 0))
             float s1 = math.abs(array.get(tv, 0) - array.get(tv, 1))
             float s2 = math.abs(array.get(tv, 1) - array.get(tv, 2))
             float s3 = math.abs(array.get(tv, 2) - array.get(tv, 3))
             //  each swing smaller than the one before it = contracting
-            if s1 > 0 and s2 > 0 and s3 > 0 and s2 < s1 and s3 < s2
+            if s0 > 0 and s1 > 0 and s2 > 0 and s3 > 0 and s1 < s0 and s2 < s1 and s3 < s2
                 ok := true
-                wide := s1
+                wide := s0
     [ok, wide]
 
 //  average volume across a leg, capped so the loop stays cheap
@@ -461,8 +485,9 @@ f_volAvg(int b1, int b2) =>
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
 //  WAVE COUNT
-//  stage 2 = 1-2 done, wave 3 running     stage 4 = 1-2-3-4 done, wave 5 running
-//  stage 5 = the impulse is finished      stage 8 = A-B-C on top of a finished impulse
+//  stage 2 = 1-2 done, wave 3 running     stage 3 = 1-2-3 done, wave 4 running
+//  stage 4 = 1-2-3-4 done, wave 5 running stage 5 = the impulse is finished
+//  stage 6 / 7 / 8 = A / A-B / A-B-C on top of a finished impulse
 // ═════════════════════════════════════════════════════════════════════════════════════════
 var int   wDir   = 0
 var int   wStage = 0
@@ -561,6 +586,23 @@ f_shapeDiag(float a0, float a1, float a2, float a3, float a4, float a5, int dir)
             ok := L5 <= L3 * tol
     ok
 
+//  a truncated fifth is only accepted when the fifth itself subdivides into five.
+//  i4 / i5 are the pivot indices of the ends of wave 4 and wave 5, a3 / a5 their prices.
+f_truncOk(int i4, int i5, float a3, float a5, int dir) =>
+    bool truncated = not na(a3) and not na(a5) and (a5 - a3) * dir <= 0
+    not truncated or not i_subOn or f_isFive(f_sub(f_b(i4), f_b(i5)))
+
+//  a diagonal is LEADING when wave 1 is a five, ENDING when it is a three, and nothing more
+//  specific when the subwave engine cannot tell - "unknown" must not default to "exhaustion"
+f_diagForm(int i0, int i1) =>
+    string v = f_sub(f_b(i0), f_b(i1))
+    f_isFive(v) ? "LEADING DIAGONAL" : f_isThree(v) ? "ENDING DIAGONAL" : "DIAGONAL"
+
+//  wave B of a flat may run past the end of wave 5 - an expanded or running flat - but not
+//  without limit: beyond 138.2 % of A the "B" is far more likely a new impulse
+f_bOk(float a5, float aA, float aB) =>
+    not na(a5) and not na(aA) and not na(aB) and math.abs(aB - aA) <= math.abs(a5 - aA) * 1.382
+
 //  a correction is SHARP when it is deep, or quick relative to the impulse it corrects
 f_kind(float impFrom, float impTo, int impBarA, int impBarB, float corrTo, int corrBar) =>
     float depth = math.abs(impTo - corrTo) / math.max(math.abs(impTo - impFrom), syminfo.mintick) * 100.0
@@ -568,16 +610,16 @@ f_kind(float impFrom, float impTo, int impBarA, int impBarB, float corrTo, int c
     depth >= i_sharpD or tr <= i_sharpT ? "SHARP" : "FLAT"
 
 if zzNew
-    int nz = array.size(zP)
+    int nPiv = array.size(zP)
     int found = 0
     int fdir = 0
     string fform = "IMPULSE"
     // ── 9 pivots: a finished impulse plus its A-B-C ────────────────────────────────────
-    if found == 0 and nz >= 9
+    if found == 0 and nPiv >= 9
         int d9 = f_h(9) ? -1 : 1
         [k1, k2, k3] = f_rules(f_p(9), f_p(8), f_p(7), f_p(6), f_p(5), f_p(4), d9)
-        bool sh9 = f_shape(f_p(9), f_p(8), f_p(7), f_p(6), f_p(5), f_p(4), d9, i_trunc)
-        bool ab9 = (f_p(3) - f_p(4)) * d9 < 0 and (f_p(2) - f_p(3)) * d9 > 0 and (f_p(1) - f_p(2)) * d9 < 0 and (f_p(2) - f_p(4)) * d9 < 0
+        bool sh9 = f_shape(f_p(9), f_p(8), f_p(7), f_p(6), f_p(5), f_p(4), d9, i_trunc) and f_truncOk(5, 4, f_p(6), f_p(4), d9)
+        bool ab9 = (f_p(3) - f_p(4)) * d9 < 0 and (f_p(2) - f_p(3)) * d9 > 0 and (f_p(1) - f_p(2)) * d9 < 0 and f_bOk(f_p(4), f_p(3), f_p(2))
         if sh9 and ab9 and k1 and (k2 or not i_rule2) and (k3 or not i_rule3)
             found := 8
             fdir  := d9
@@ -586,11 +628,11 @@ if zzNew
             R2 := k2
             R3 := k3
     // -- 8 pivots: a finished impulse plus A and B ------------------------------------
-    if found == 0 and nz >= 8
+    if found == 0 and nPiv >= 8
         int d8 = f_h(8) ? -1 : 1
         [e1, e2, e3] = f_rules(f_p(8), f_p(7), f_p(6), f_p(5), f_p(4), f_p(3), d8)
-        bool sh8 = f_shape(f_p(8), f_p(7), f_p(6), f_p(5), f_p(4), f_p(3), d8, i_trunc)
-        bool ab8 = (f_p(2) - f_p(3)) * d8 < 0 and (f_p(1) - f_p(2)) * d8 > 0 and (f_p(1) - f_p(3)) * d8 < 0
+        bool sh8 = f_shape(f_p(8), f_p(7), f_p(6), f_p(5), f_p(4), f_p(3), d8, i_trunc) and f_truncOk(4, 3, f_p(5), f_p(3), d8)
+        bool ab8 = (f_p(2) - f_p(3)) * d8 < 0 and (f_p(1) - f_p(2)) * d8 > 0 and f_bOk(f_p(3), f_p(2), f_p(1))
         if sh8 and ab8 and e1 and (e2 or not i_rule2) and (e3 or not i_rule3)
             found := 7
             fdir  := d8
@@ -599,10 +641,10 @@ if zzNew
             R2 := e2
             R3 := e3
     // -- 7 pivots: a finished impulse plus A -------------------------------------------
-    if found == 0 and nz >= 7
+    if found == 0 and nPiv >= 7
         int d7 = f_h(7) ? -1 : 1
         [c1, c2, c3] = f_rules(f_p(7), f_p(6), f_p(5), f_p(4), f_p(3), f_p(2), d7)
-        bool sh7 = f_shape(f_p(7), f_p(6), f_p(5), f_p(4), f_p(3), f_p(2), d7, i_trunc)
+        bool sh7 = f_shape(f_p(7), f_p(6), f_p(5), f_p(4), f_p(3), f_p(2), d7, i_trunc) and f_truncOk(3, 2, f_p(4), f_p(2), d7)
         bool ab7 = (f_p(1) - f_p(2)) * d7 < 0
         if sh7 and ab7 and c1 and (c2 or not i_rule2) and (c3 or not i_rule3)
             found := 6
@@ -612,10 +654,10 @@ if zzNew
             R2 := c2
             R3 := c3
     // ── 6 pivots: a finished impulse ───────────────────────────────────────────────────
-    if found == 0 and nz >= 6
+    if found == 0 and nPiv >= 6
         int d6 = f_h(6) ? -1 : 1
         [m1, m2, m3] = f_rules(f_p(6), f_p(5), f_p(4), f_p(3), f_p(2), f_p(1), d6)
-        if f_shape(f_p(6), f_p(5), f_p(4), f_p(3), f_p(2), f_p(1), d6, i_trunc) and m1 and (m2 or not i_rule2) and (m3 or not i_rule3)
+        if f_shape(f_p(6), f_p(5), f_p(4), f_p(3), f_p(2), f_p(1), d6, i_trunc) and f_truncOk(2, 1, f_p(3), f_p(1), d6) and m1 and (m2 or not i_rule2) and (m3 or not i_rule3)
             found := 5
             fdir  := d6
             f_setCount(6, 5, 4, 3, 2, 1, 0, 0, 0)
@@ -624,20 +666,20 @@ if zzNew
             R3 := m3
     // ── 6 pivots: a finished DIAGONAL ──────────────────────────────────────────────────
     //  wave 4 overlaps wave 1, which is exactly what disqualifies it as an impulse
-    if found == 0 and i_diagOn and nz >= 6
+    if found == 0 and i_diagOn and nPiv >= 6
         int dg6 = f_h(6) ? -1 : 1
         [g1r, g2r, g3r] = f_rules(f_p(6), f_p(5), f_p(4), f_p(3), f_p(2), f_p(1), dg6)
         if f_shapeDiag(f_p(6), f_p(5), f_p(4), f_p(3), f_p(2), f_p(1), dg6) and g1r and (g2r or not i_rule2)
             found := 5
             fdir  := dg6
             //  a leading diagonal subdivides 5-3-5-3-5, an ending diagonal 3-3-3-3-3
-            fform := f_isFive(f_sub(f_b(6), f_b(5))) ? "LEADING DIAGONAL" : "ENDING DIAGONAL"
+            fform := f_diagForm(6, 5)
             f_setCount(6, 5, 4, 3, 2, 1, 0, 0, 0)
             R1 := g1r
             R2 := g2r
             R3 := true
     // ── 5 pivots: 1-2-3-4 done, wave 5 is running ──────────────────────────────────────
-    if found == 0 and nz >= 5
+    if found == 0 and nPiv >= 5
         int d5 = f_h(5) ? -1 : 1
         [q1, q2, q3] = f_rules(f_p(5), f_p(4), f_p(3), f_p(2), f_p(1), float(na), d5)
         if f_shape(f_p(5), f_p(4), f_p(3), f_p(2), f_p(1), float(na), d5, false) and q1 and (q2 or not i_rule2) and (q3 or not i_rule3)
@@ -648,19 +690,33 @@ if zzNew
             R2 := q2
             R3 := q3
     // ── 5 pivots: a DIAGONAL with wave 5 still running ─────────────────────────────────
-    if found == 0 and i_diagOn and nz >= 5
+    if found == 0 and i_diagOn and nPiv >= 5
         int dg5 = f_h(5) ? -1 : 1
         [h1r, h2r, h3r] = f_rules(f_p(5), f_p(4), f_p(3), f_p(2), f_p(1), float(na), dg5)
         if f_shapeDiag(f_p(5), f_p(4), f_p(3), f_p(2), f_p(1), float(na), dg5) and h1r and (h2r or not i_rule2)
             found := 4
             fdir  := dg5
-            fform := f_isFive(f_sub(f_b(5), f_b(4))) ? "LEADING DIAGONAL" : "ENDING DIAGONAL"
+            fform := f_diagForm(5, 4)
             f_setCount(5, 4, 3, 2, 1, 0, 0, 0, 0)
             R1 := h1r
             R2 := h2r
             R3 := true
+    // ── 4 pivots: 1-2-3 done, wave 4 is running ────────────────────────────────────────
+    //  Without this stage the end of wave 3 matched no template and the count fell to
+    //  "no valid count" for the whole of wave 4 - exactly when the wave 4 zone and the
+    //  1-3 channel are supposed to be doing their work.
+    if found == 0 and nPiv >= 4
+        int d4 = f_h(4) ? -1 : 1
+        [s1, s2, s3] = f_rules(f_p(4), f_p(3), f_p(2), f_p(1), float(na), float(na), d4)
+        if f_shape(f_p(4), f_p(3), f_p(2), f_p(1), float(na), float(na), d4, false) and s1 and (s2 or not i_rule2)
+            found := 3
+            fdir  := d4
+            f_setCount(4, 3, 2, 1, 0, 0, 0, 0, 0)
+            R1 := s1
+            R2 := s2
+            R3 := s3
     // ── 3 pivots: 1-2 done, wave 3 is running ──────────────────────────────────────────
-    if found == 0 and nz >= 3
+    if found == 0 and nPiv >= 3
         int d3 = f_h(3) ? -1 : 1
         [v1, v2, v3] = f_rules(f_p(3), f_p(2), f_p(1), float(na), float(na), float(na), d3)
         if f_shape(f_p(3), f_p(2), f_p(1), float(na), float(na), float(na), d3, false) and (v2 or not i_rule2)
@@ -724,7 +780,7 @@ if zzNew
         subB := na(xB) ? "·" : f_sub(xA, xB)
         subC := na(xC) ? "·" : f_sub(xB, xC)
         //  is wave 4 a triangle?
-        [tri4, triW] = f_triCheck(x3, x4)
+        [tri4, triW] = f_triCheck(x3, x4, p3)
         w4Tri  := tri4
         w4TriW := triW
         //  GUIDELINE · VOLUME - wave 3 almost always carries the greatest volume.
@@ -781,20 +837,65 @@ xA = array.get(WX, 6)
 xB = array.get(WX, 7)
 xC = array.get(WX, 8)
 
-// ── live invalidation: the count dies the moment a golden rule breaks ──────────────────
 bool isDiag = wForm != "IMPULSE"
-bool invNow = false
-if wStage > 0 and i_killInv
-    if i_rule2 and wStage >= 2 and not na(p0) and (close - p0) * wDir < 0
+
+// ── rule 1 as a live ceiling for wave 5 ──────────────────────────────────────────────────
+//  Wave 3 may not be the shortest of 1, 3 and 5.  Once 1, 3 and 4 are known that turns into a
+//  price: if wave 3 is shorter than wave 1 - or "must be the longest" is selected - wave 5 may
+//  not travel further than wave 3 did.  Measured in points or in percent, like the rule itself.
+f_capPx(float from, float lenRule1, int dir) =>
+    na(from) or na(lenRule1) ? float(na) : i_r1log and from > 0 ? from * math.exp(lenRule1 * dir) : from + lenRule1 * dir
+r1L1   = f_len(p0, p1)
+r1L3   = f_len(p2, p3)
+w5_cap = wStage == 4 and not na(r1L1) and not na(r1L3) and (strictR1 or r1L3 < r1L1) ? f_capPx(p4, r1L3, wDir) : float(na)
+
+// ── live invalidation: the count dies the moment a golden rule breaks ──────────────────
+//  Only while the count is still unfolding.  A FINISHED impulse or diagonal is followed by a
+//  correction that is supposed to travel back through these levels - calling that "invalid"
+//  would declare the count dead at the very moment its own forecast comes true.
+//  The kill LATCHES: a close back inside does not resurrect a count that has already died.
+var int deadX0  = na
+var int deadDir = 0
+bool cntDead = wStage > 0 and not na(deadX0) and deadX0 == x0 and deadDir == wDir
+bool inProg  = wStage >= 2 and wStage <= 4
+bool invNow  = false
+if i_killInv and inProg and not cntDead
+    if i_rule2 and not na(p0) and (close - p0) * wDir < 0
         invNow := true
         invMsg := "RULE 2 BROKEN · wave 2 surpassed the start of wave 1"
-    if not isDiag and i_rule3 and wStage >= 4 and not na(p1) and (close - p1) * wDir < 0
-        invNow := true
-        invMsg := "RULE 3 BROKEN · wave 4 overlapped wave 1's price territory"
-    //  in a diagonal the overlap is allowed, but wave 4 may never pass the end of wave 2
-    if isDiag and wStage >= 4 and not na(p2) and (close - p2) * wDir < 0
-        invNow := true
-        invMsg := "DIAGONAL BROKEN · wave 4 travelled beyond the end of wave 2"
+    if wStage == 3
+        //  wave 4 is running and the form is not known yet: overlapping wave 1 still leaves a
+        //  diagonal open (when diagonals are on), passing the end of wave 2 leaves nothing
+        if (not i_diagOn) and i_rule3 and not na(p1) and (close - p1) * wDir < 0
+            invNow := true
+            invMsg := "RULE 3 BROKEN · wave 4 overlapped wave 1's price territory"
+        if i_diagOn and not na(p2) and (close - p2) * wDir < 0
+            invNow := true
+            invMsg := "RULE 3 BROKEN · wave 4 passed the end of wave 2 - neither an impulse nor a diagonal"
+    if wStage == 4
+        if not isDiag and i_rule3 and not na(p1) and (close - p1) * wDir < 0
+            invNow := true
+            invMsg := "RULE 3 BROKEN · wave 4 overlapped wave 1's price territory"
+        //  in a diagonal the overlap is allowed, but wave 4 may never pass the end of wave 2
+        if isDiag and not na(p2) and (close - p2) * wDir < 0
+            invNow := true
+            invMsg := "DIAGONAL BROKEN · wave 4 travelled beyond the end of wave 2"
+        if not na(w5_cap) and (close - w5_cap) * wDir > 0
+            invNow := true
+            invMsg := "RULE 1 BROKEN · wave 5 outran wave 3, which would make wave 3 the shortest"
+if invNow
+    deadX0  := x0
+    deadDir := wDir
+bool cntDeadNow = cntDead or invNow
+
+// ── the volume guideline, kept current while wave 5 runs ─────────────────────────────────
+//  Computed only at pivot time it would judge wave 5 by its first few bars forever.
+if wStage == 4 and i_gVol and not na(x2) and not na(x3) and not na(x4) and bar_index > x4
+    float v3L = f_volAvg(x2, x3)
+    float v5L = f_volAvg(x4, bar_index)
+    if not na(v3L) and not na(v5L) and v3L > 0
+        G5     := v5L < v3L
+        volExt := v5L >= v3L
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
 //  THE FOUR FIBONACCI TOOLS  ·  exactly the anchors the model uses
@@ -819,6 +920,11 @@ w4_avgB = f_fib(p3, p2, 40.0)
 //                      target 2 = 161.8 % of wave 4  (0 % = wave 4 extreme, 100 % = wave 3 extreme)
 w5_t1 = na(p4) or na(p1) or na(p0) ? float(na) : p4 + (p1 - p0)
 w5_t2 = f_fib(p4, p3, i_w5t2)
+//  the trade targets for wave 5 never sit beyond the rule 1 ceiling: a target that can only be
+//  reached by breaking a golden rule is not a target of this count
+f_capTo(float t, float cap, int dir) => na(t) or na(cap) ? t : (t - cap) * dir > 0 ? cap : t
+w5_tp1 = f_capTo(w5_t1, w5_cap, wDir)
+w5_tp2 = na(w5_cap) or na(w5_t2) ? w5_t2 : (w5_t2 - w5_cap) * wDir > 0 ? float(na) : w5_t2
 
 //  tool 5  ·  wave 5 measured against the NET of waves 1 through 3
 //            0.382 / 0.618 when wave 5 is normal, 1.618 when it is the extension
@@ -942,27 +1048,36 @@ var string lastSigS = ""
 var int    fired3Bar = na
 var int    fired5Bar = na
 var string skipMsg = ""
+var int    invs   = 0
+var int    firedCBar = na
 
-if invNow and tLive
-    tLive  := false
-    tState := "COUNT INVALID"
-
-gOk = (G1 ? 1 : 0) + (G2 ? 1 : 0) + (G3 ? 1 : 0) + (G4 ? 1 : 0) + (G5 ? 1 : 0) >= i_gReq
+//  GUIDELINES REQUIRED.  Only the guidelines that can already be judged at this stage count,
+//  and the requirement is capped at that number - otherwise any requirement above zero would
+//  silently disable the wave 3 entry, where no guideline is knowable yet.
+//    stage 2: none  ·  stage 4: alternation (+ volume)  ·  stage 5+: all but the ABC depth
+//    stage 8: all five
+gMet   = (G1 ? 1 : 0) + (G2 ? 1 : 0) + (G3 ? 1 : 0) + (G4 ? 1 : 0) + (G5 ? 1 : 0)
+gKnown = wStage >= 8 ? (i_gVol ? 5 : 4) : wStage >= 5 ? (i_gVol ? 4 : 3) : wStage == 4 ? (i_gVol ? 2 : 1) : 0
+gOk    = gMet >= math.min(i_gReq, gKnown)
 
 w2InZone = not na(w2Depth) and w2Depth >= math.min(i_w2Lo, i_w2Hi) * 0.75 and w2Depth <= i_w2Max
 w2Sweet  = not na(w2Depth) and w2Depth >= math.min(i_w2Lo, i_w2Hi) and w2Depth <= math.max(i_w2Lo, i_w2Hi)
 fvg2Ok   = not i_fvgReq or not na(g2t)
-setup3   = i_t3On and wStage == 2 and not tLive and not invNow and w2InZone and R2 and gOk and fvg2Ok and (na(fired3Bar) or fired3Bar != x2)
+setup3   = i_t3On and wStage == 2 and not tLive and not cntDeadNow and w2InZone and R2 and gOk and fvg2Ok and (na(fired3Bar) or fired3Bar != x2)
 trig3    = setup3 and f_trigger(i_t3Trig, wDir, z2Top, z2Bot, x2, i_t3Bars)
 
 w4InZone = not na(w4Depth) and w4Depth >= math.min(i_w4Lo, i_w4Hi) * 0.7 and w4Depth <= math.max(i_w4Lo, i_w4Hi) * 1.25
 w4Sweet  = not na(w4Depth) and w4Depth >= math.min(i_w4Lo, i_w4Hi) and w4Depth <= math.max(i_w4Lo, i_w4Hi)
 fvg4Ok   = not i_fvgReq or not na(g4t)
-setup5   = i_t5On and wStage == 4 and not tLive and not invNow and w4InZone and R1 and R2 and R3 and gOk and fvg4Ok and (na(fired5Bar) or fired5Bar != x4)
+setup5   = i_t5On and wStage == 4 and not tLive and not cntDeadNow and w4InZone and R1 and R2 and R3 and gOk and fvg4Ok and (na(fired5Bar) or fired5Bar != x4)
 trig5    = setup5 and f_trigger(i_t5Trig, wDir, z4Top, z4Bot, x4, i_t5Bars)
 
-setupC = i_abcSig and wStage == 7 and not tLive and not invNow and not na(pB) and not na(p4)
+setupC = i_abcSig and wStage == 7 and not tLive and not na(pB) and not na(p4) and (na(firedCBar) or firedCBar != xB)
 trigC  = setupC and (wDir == 1 ? (close < low[1] and close < open) : (close > high[1] and close > open)) and not na(xB) and bar_index - xB <= 25 and bar_index > xB
+
+//  a limit order at `lim` fills at `lim`, or at the open when the bar gapped through it -
+//  never at a price the bar did not trade
+f_limitFill(float lim, int sd) => na(lim) ? close : sd == 1 ? math.min(lim, open) : math.max(lim, open)
 
 bool fireNow = false
 
@@ -973,16 +1088,16 @@ if trig3 or trig5 or trigC
     float inv = trig3 ? p0 : trig5 ? p1 : pB
     float ent = close
     if trig3 and i_t3Trig == "Zone tap (limit style)"
-        ent := w2_lo
+        ent := f_limitFill(w2_lo, sd)
     if trig5 and i_t5Trig == "Zone tap (limit style)"
-        ent := w4_lo
+        ent := f_limitFill(w4_lo, sd)
     float slp = switch i_slMode
         "At the rule invalidation level" => inv
         "ATR distance"                   => ent - sd * i_slAtr * atr
         => piv
     float slx = sd == 1 ? math.min(slp, low) - i_slBuf * atr : math.max(slp, high) + i_slBuf * atr
-    float tp1 = trig3 ? w3_t1 : trig5 ? w5_t1 : p4
-    float tp2 = trig3 ? w3_t2 : trig5 ? w5_t2 : float(na)
+    float tp1 = trig3 ? w3_t1 : trig5 ? w5_tp1 : p4
+    float tp2 = trig3 ? w3_t2 : trig5 ? w5_tp2 : float(na)
     float rsk = math.abs(ent - slx)
     float rr  = rsk > 0 and not na(tp1) ? math.abs(tp1 - ent) / rsk : float(na)
     if not na(rr) and rr >= i_minRR and rsk > 0
@@ -1007,27 +1122,41 @@ if trig3 or trig5 or trigC
         fired3Bar := x2
     if wv == 5
         fired5Bar := x4
+    if wv == 7
+        firedCBar := xB
 
-bool hitTp = false
-bool hitSl = false
-bool hitBe = false
+//  Trade management.  The stop that is live on a bar is the one that was live when the bar
+//  OPENED: break-even armed during a bar only protects from the next bar on, so a bar that
+//  touched +1R and the original stop is not booked as a break-even.
+bool hitTp  = false
+bool hitSl  = false
+bool hitBe  = false
+bool beMove = false
+bool hitInv = false
 if tLive and not fireNow
+    float stopNow = tBe ? tEnt : tSl
     if tDir == 1
-        if i_beOn and not tBe and high >= tEnt + i_beAt * math.abs(tEnt - tSl)
-            tBe := true
         if not na(tTp1) and high >= tTp1
             hitTp := true
-        else if low <= (tBe ? tEnt : tSl)
+        else if low <= stopNow
             hitSl := not tBe
             hitBe := tBe
+        else if i_beOn and not tBe and high >= tEnt + i_beAt * math.abs(tEnt - tSl)
+            beMove := true
     else
-        if i_beOn and not tBe and low <= tEnt - i_beAt * math.abs(tEnt - tSl)
-            tBe := true
         if not na(tTp1) and low <= tTp1
             hitTp := true
-        else if high >= (tBe ? tEnt : tSl)
+        else if high >= stopNow
             hitSl := not tBe
             hitBe := tBe
+        else if i_beOn and not tBe and low <= tEnt - i_beAt * math.abs(tEnt - tSl)
+            beMove := true
+    if beMove
+        tBe := true
+    //  the count died under an open trade: close it at this bar's close and book it, instead
+    //  of letting it vanish from the record
+    if invNow and not hitTp and not hitSl and not hitBe
+        hitInv := true
 
 if hitTp
     wins   := wins + 1
@@ -1041,6 +1170,10 @@ else if hitBe
     bes    := bes + 1
     tLive  := false
     tState := "BREAK EVEN"
+else if hitInv
+    invs   := invs + 1
+    tLive  := false
+    tState := "COUNT INVALID"
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
 //  CHART THEME
@@ -1048,7 +1181,7 @@ else if hitBe
 bgcolor(i_theme ? cNavy : na, title = "Chart background")
 bgcolor(i_grid and timeframe.change("D") ? color.new(cCyan, 90) : na, title = "Day separator")
 
-inCorr = wStage > 0 and ((wStage == 2 and not na(x1) and bar_index >= x1) or (wStage == 4 and not na(x3) and not na(x4) and bar_index >= x3 and bar_index <= x4))
+inCorr = wStage > 0 and ((wStage == 2 and not na(x1) and not na(x2) and bar_index >= x1 and bar_index <= x2) or (wStage == 3 and not na(x3) and bar_index >= x3) or (wStage == 4 and not na(x3) and not na(x4) and bar_index >= x3 and bar_index <= x4))
 rawCol = close >= open ? cMint : cRed
 barcolor(i_barCol ? (i_waveCol and inCorr ? color.new(rawCol, 45) : rawCol) : na, title = "Recoloured candles")
 
@@ -1079,10 +1212,14 @@ f_wave(int b, float y, string txt, bool down, color col, string tip) =>
     lb
 
 //  the five-or-three verdict written on the middle of a leg
-f_tag(int b1, float y1, int b2, float y2, string v, bool motive) =>
+//  triangle = this corrective leg was identified as a contracting triangle, whose five legs
+//  a-b-c-d-e are each a three: five swings are then exactly what is expected, not a violation
+f_tag(int b1, float y1, int b2, float y2, string v, bool motive, bool triangle) =>
     if not na(b1) and not na(b2) and not na(y1) and not na(y2) and v != "·"
-        bool bad = motive ? not f_isFive(v) : not f_isThree(v)
-        lb = label.new(math.round((b1 + b2) / 2), (y1 + y2) / 2, v, style = label.style_none, textcolor = bad ? color.new(cGold, 20) : color.new(cGrey, 25), size = size.tiny, tooltip = (motive ? "This leg should subdivide into FIVE - it is a motive wave." : "This leg should subdivide into THREE - it is a corrective wave. Corrections are never fives, and an initial five wave move against the larger trend is never the end of a correction, only part of it.") + "\n\nThe subwave engine counted: " + v + (bad ? "\n\nThat disagrees with the label. Either the finer zigzag is not resolving this degree - try a smaller subwave pivot strength - or the count itself is wrong." : "\n\nThat agrees with the label."))
+        bool bad = v == "?" ? true : triangle ? v != "5" : motive ? not f_isFive(v) : not f_isThree(v)
+        string want = triangle ? "This leg is a contracting TRIANGLE: five legs a-b-c-d-e, each of them a three (3-3-3-3-3). Five swings at this degree is exactly what a triangle looks like - it is the one corrective pattern that counts out to five." : motive ? "This leg should subdivide into FIVE - it is a motive wave." : "This leg should subdivide into THREE - it is a corrective wave. Corrections are never fives, and an initial five wave move against the larger trend is never the end of a correction, only part of it."
+        string got = v == "?" ? "\n\nThe subwave engine counted an EVEN number of swings, which means the finer pivots do not line up with the ends of this leg. No verdict is possible - adjust the subwave pivot strength." : "\n\nThe subwave engine counted: " + v + (bad ? "\n\nThat disagrees with the label. Either the finer zigzag is not resolving this degree - try a smaller subwave pivot strength - or the count itself is wrong." : "\n\nThat agrees with the label.")
+        lb = label.new(math.round((b1 + b2) / 2), (y1 + y2) / 2, v, style = label.style_none, textcolor = bad ? color.new(cGold, 20) : color.new(cGrey, 25), size = size.tiny, tooltip = want + got)
         array.push(acB, lb)
     0
 
@@ -1137,15 +1274,19 @@ if zzNew and wStage > 0 and (i_showSkel or i_showLbl)
 
     // ── the five-or-three verdict, written on the leg itself ──────────────────────────
     if i_subTag and i_subOn
-        f_tag(x0, p0, x1, p1, sub1, wForm != "ENDING DIAGONAL")
-        f_tag(x1, p1, x2, p2, sub2, false)
-        f_tag(x2, p2, x3, p3, sub3, true)
-        f_tag(x3, p3, x4, p4, sub4, false)
-        f_tag(x4, p4, x5, p5, sub5, wForm == "IMPULSE")
+        //  impulse and leading diagonal: waves 1, 3 and 5 are fives.  Ending diagonal: threes.
+        bool actFive = wForm != "ENDING DIAGONAL"
+        f_tag(x0, p0, x1, p1, sub1, actFive, false)
+        f_tag(x1, p1, x2, p2, sub2, false, false)
+        f_tag(x2, p2, x3, p3, sub3, actFive, false)
+        f_tag(x3, p3, x4, p4, sub4, false, w4Tri)
+        f_tag(x4, p4, x5, p5, sub5, actFive, false)
         if i_abcOn
-            f_tag(x5, p5, xA, pA, subA, false)
-            f_tag(xA, pA, xB, pB, subB, false)
-            f_tag(xB, pB, xC, pC, subC, false)
+            //  A is a five in a zigzag and a three in a flat - either is a valid answer, the
+            //  verdict decides the family.  B is a three.  C is a five in both zigzag and flat.
+            f_tag(x5, p5, xA, pA, subA, f_isFive(subA), false)
+            f_tag(xA, pA, xB, pB, subB, false, false)
+            f_tag(xB, pB, xC, pC, subC, true, false)
 
     if i_showLbl
         string th = (up ? "BULLISH " : "BEARISH ") + wForm + " COUNT\n"
@@ -1193,9 +1334,12 @@ if barstate.islast
             if wStage == 2 and not na(w3_t1)
                 array.push(dyL, line.new(x2, p2, bar_index + i_projBars, w3_t1, color = color.new(cGold, 25), width = 2, style = line.style_dotted))
                 array.push(dyB, label.new(bar_index + i_projBars, w3_t1, "WAVE ③ projected", style = label.style_label_left, color = color.new(cSect, 25), textcolor = cGold, size = size.tiny, tooltip = "The wave that has not happened yet, drawn to its first fibonacci target.\nWave 3 often extends to 161.8 % or 261.8 % of wave 1 and it is the longest impulse wave of the structure."))
-            if wStage == 4 and not na(w5_t1)
-                array.push(dyL, line.new(x4, p4, bar_index + i_projBars, w5_t1, color = color.new(cGold, 25), width = 2, style = line.style_dotted))
-                array.push(dyB, label.new(bar_index + i_projBars, w5_t1, "WAVE ⑤ projected", style = label.style_label_left, color = color.new(cSect, 25), textcolor = cGold, size = size.tiny, tooltip = "Wave 5 typically equals 100 % of wave 1, projected from the end of wave 4."))
+            if wStage == 3 and not na(w4_382)
+                array.push(dyL, line.new(x3, p3, bar_index + i_projBars, w4_382, color = color.new(cCyan, 35), width = 1, style = line.style_dotted))
+                array.push(dyB, label.new(bar_index + i_projBars, w4_382, "WAVE ④ projected", style = label.style_label_left, color = color.new(cSect, 25), textcolor = cCyan, size = size.tiny, tooltip = "Wave 4 is running. It commonly retraces 23.6 - 50 % of wave 3, the average is 30 - 40 % - drawn here to 38.2 %.\nIt may not enter wave 1's price territory (rule 3)."))
+            if wStage == 4 and not na(w5_tp1)
+                array.push(dyL, line.new(x4, p4, bar_index + i_projBars, w5_tp1, color = color.new(cGold, 25), width = 2, style = line.style_dotted))
+                array.push(dyB, label.new(bar_index + i_projBars, w5_tp1, "WAVE ⑤ projected", style = label.style_label_left, color = color.new(cSect, 25), textcolor = cGold, size = size.tiny, tooltip = "Wave 5 typically equals 100 % of wave 1, projected from the end of wave 4." + (na(w5_cap) ? "" : "\nCapped at the rule 1 ceiling: wave 3 is shorter than wave 1 here, so wave 5 may not travel further than wave 3 did.")))
             if wStage == 5 and i_abcTgt and not na(p4) and not na(x5)
                 array.push(dyL, line.new(x5, p5, bar_index + i_projBars, p4, color = color.new(cPink, 35), width = 1, style = line.style_dotted))
                 array.push(dyB, label.new(bar_index + i_projBars, p4, "ABC projected", style = label.style_label_left, color = color.new(cSect, 25), textcolor = cPink, size = size.tiny, tooltip = "After a five wave impulse advance, ABC corrections commonly end near the prior extreme of wave 4."))
@@ -1212,15 +1356,17 @@ if barstate.islast
                 if wStage == 2
                     f_fibLine(x2, w3_t1, str.tostring(i_w3t1, "#.0") + " %   WAVE 3 TARGET 1", cMint, true, "WAVE 3 EXTENSION OF WAVE 1\nMeasured from the wave 2 extreme, wave 3 often extends to 161.8 % or 261.8 % of wave 1.\nThis is target 1 of the wave 3 trade.")
                     f_fibLine(x2, w3_t2, str.tostring(i_w3t2, "#.0") + " %   WAVE 3 TARGET 2", color.new(cMint, 25), false, "WAVE 3 EXTENSION OF WAVE 1\n261.8 % is the second and larger of the two typical wave 3 extensions.")
-            if wStage >= 4 and not na(p4)
-                string tw4 = "WAVE 4 RETRACEMENT OF WAVE 3\n0 % sits at the end of wave 3, 100 % at its start.\nWave 4 commonly retraces to 23.6 %, 38.2 % or 50.0 % of wave 3, the average is 30 - 40 %.\nThis wave 4 retraced " + f_pct(w4Depth) + "."
+            if wStage >= 3 and not na(p3)
+                string tw4 = "WAVE 4 RETRACEMENT OF WAVE 3\n0 % sits at the end of wave 3, 100 % at its start.\nWave 4 commonly retraces to 23.6 %, 38.2 % or 50.0 % of wave 3, the average is 30 - 40 %.\n" + (na(w4Depth) ? "Wave 4 is still running." : "This wave 4 retraced " + f_pct(w4Depth) + ".")
                 f_fibLine(x3, p3, "0.00 %   end of wave 3", color.new(cGrey, 15), false, tw4)
                 f_fibLine(x3, w4_lo, str.tostring(i_w4Lo, "#.0") + " %", cGold, not na(w4Depth) and math.abs(w4Depth - i_w4Lo) < 4, tw4)
                 f_fibLine(x3, w4_382, "38.20 %", cGold, not na(w4Depth) and math.abs(w4Depth - 38.2) < 4, tw4)
                 f_fibLine(x3, w4_hi, str.tostring(i_w4Hi, "#.0") + " %", cGold, not na(w4Depth) and math.abs(w4Depth - i_w4Hi) < 4, tw4)
                 f_fibLine(x1, p1, "RULE 3   wave 1 territory", color.new(cSupply, 10), false, "RULE 3 INVALIDATION\nWave 4 cannot overlap with wave 1's price territory. A close beyond this level kills the count.")
+                if wStage == 4 and not na(w5_cap)
+                    f_fibLine(x4, w5_cap, "RULE 1   ⑤ ceiling", color.new(cSupply, 10), true, "RULE 1 CEILING\nWave 3 is never the shortest of waves 1, 3 and 5. " + (strictR1 ? "With 'must be the longest' selected" : "Wave 3 is shorter than wave 1 in this count, so") + " wave 5 may not travel further than wave 3 did.\n\nA close beyond " + f_px(w5_cap) + " breaks rule 1 and kills the count. The wave 5 trade targets are capped here.")
                 if wStage == 4
-                    f_fibLine(x4, w5_t1, "100.00 %   WAVE 5  =  WAVE 1", cMint, true, "WAVE 5 TARGET 1\nWave 5 typically equals 100 % of wave 1, projected from the end of wave 4.\nGuideline 1 says the same thing from the other side: when wave 3 is the extended wave, wave 5 approximates the length of wave 1.")
+                    f_fibLine(x4, w5_t1, "100.00 %   WAVE 5  =  WAVE 1" + (w5_tp1 != w5_t1 ? "  ·  beyond the rule 1 ceiling" : ""), cMint, true, "WAVE 5 TARGET 1\nWave 5 typically equals 100 % of wave 1, projected from the end of wave 4.\nGuideline 1 says the same thing from the other side: when wave 3 is the extended wave, wave 5 approximates the length of wave 1.")
                     f_fibLine(x4, w5_t2, str.tostring(i_w5t2, "#.0") + " %   of wave 4", color.new(cMint, 25), false, "WAVE 5 TARGET 2\n161.8 % of wave 4, anchored 0 % at the wave 4 extreme and 100 % at the wave 3 extreme - the second fibonacci tool drawn over wave 5.")
             if wStage >= 5 and i_abcTgt and not na(p4) and not na(x5)
                 f_fibLine(x5, p4, "ABC TARGET   prior wave ④", color.new(cPink, 10), true, "GUIDELINE 3\nAfter a five wave impulse advance, A-B-C corrections commonly end near the prior extreme of wave 4.\nThat makes " + f_px(p4) + " the natural draw for this correction, and the level to watch for the next impulse to start from.")
@@ -1228,7 +1374,7 @@ if barstate.islast
         if i_zoneBox
             if wStage == 2 and not na(z2Top) and not na(z2Bot) and not na(x1)
                 array.push(dyX, box.new(x1, z2Top, bar_index + i_rightExt, z2Bot, border_color = color.new(upL ? cDemand : cSupply, 35), border_width = 1, bgcolor = color.new(upL ? cDemand : cSupply, 84), text = "WAVE ② ZONE  ·  " + str.tostring(i_w2Lo, "#.0") + " - " + str.tostring(i_w2Hi, "#.0") + " % of wave 1", text_color = color.new(upL ? cDemand : cSupply, 0), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_center))
-            if wStage == 4 and not na(z4Top) and not na(z4Bot) and not na(x3)
+            if (wStage == 3 or wStage == 4) and not na(z4Top) and not na(z4Bot) and not na(x3)
                 array.push(dyX, box.new(x3, z4Top, bar_index + i_rightExt, z4Bot, border_color = color.new(upL ? cDemand : cSupply, 35), border_width = 1, bgcolor = color.new(upL ? cDemand : cSupply, 84), text = "WAVE ④ ZONE  ·  " + str.tostring(i_w4Lo, "#.0") + " - " + str.tostring(i_w4Hi, "#.0") + " % of wave 3", text_color = color.new(upL ? cDemand : cSupply, 0), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_center))
                 if i_showAvg and not na(w4_avgA) and not na(w4_avgB)
                     array.push(dyX, box.new(x3, math.max(w4_avgA, w4_avgB), bar_index + i_rightExt, math.min(w4_avgA, w4_avgB), border_color = color.new(cCyan, 60), border_width = 1, bgcolor = color.new(cCyan, 92), text = "30 - 40 %  average", text_color = color.new(cCyan, 20), text_size = size.tiny, text_halign = text.align_left, text_valign = text.align_center))
@@ -1355,13 +1501,13 @@ if i_levels and fireNow
     lTp1 := line.new(bar_index, tTp1, bar_index + i_rightExt * 2, tTp1, color = cMint, width = 1, style = line.style_dashed)
     bEnt := label.new(bar_index + i_rightExt * 2, tEnt, "ENTRY " + f_px(tEnt), style = label.style_label_left, color = color.new(cSect, 20), textcolor = cGold, size = size.tiny)
     bSl  := label.new(bar_index + i_rightExt * 2, tSl, "SL " + f_px(tSl) + "   " + f_pips(tEnt - tSl) + " pips", style = label.style_label_left, color = color.new(cSect, 20), textcolor = cPink, size = size.tiny)
-    bTp1 := label.new(bar_index + i_rightExt * 2, tTp1, "TP1 " + f_px(tTp1) + "   " + (tWave == 3 ? str.tostring(i_w3t1, "#.0") + " % of wave 1" : tWave == 5 ? "wave 5 = wave 1" : "prior wave 4"), style = label.style_label_left, color = color.new(cSect, 20), textcolor = cMint, size = size.tiny)
+    bTp1 := label.new(bar_index + i_rightExt * 2, tTp1, "TP1 " + f_px(tTp1) + "   " + (tWave == 3 ? str.tostring(i_w3t1, "#.0") + " % of wave 1" : tWave == 5 ? (tTp1 != w5_t1 ? "rule 1 ceiling" : "wave 5 = wave 1") : "prior wave 4"), style = label.style_label_left, color = color.new(cSect, 20), textcolor = cMint, size = size.tiny)
     if not na(tTp2)
         lTp2 := line.new(bar_index, tTp2, bar_index + i_rightExt * 2, tTp2, color = color.new(cMint, 45), width = 1, style = line.style_dotted)
         bTp2 := label.new(bar_index + i_rightExt * 2, tTp2, "TP2 " + f_px(tTp2) + "   " + (tWave == 3 ? str.tostring(i_w3t2, "#.0") + " % of wave 1" : str.tostring(i_w5t2, "#.0") + " % of wave 4"), style = label.style_label_left, color = color.new(cSect, 35), textcolor = color.new(cMint, 30), size = size.tiny)
 
 // once the trade is closed the levels stay for reference, but step out of the way
-if (hitTp or hitSl or hitBe) and i_levels
+if (hitTp or hitSl or hitBe or hitInv) and i_levels
     if not na(lEnt)
         line.set_color(lEnt, color.new(cGold, 70))
         label.set_textcolor(bEnt, color.new(cGold, 55))
@@ -1382,7 +1528,7 @@ if i_eduCard and barstate.islast
     label.delete(cardA)
     label.delete(cardB)
     cardA := label.new(bar_index + 14, hi300, "HOW TO READ THIS", style = label.style_label_left, color = color.new(cSect, 12), textcolor = cGold, size = size.small, tooltip = "HOW TO READ THIS INDICATOR\n\n1  SOLID LEGS are motive waves - larger, moving with the trend. DASHED LEGS are corrective waves - smaller, moving against it. That is the entire definition the whole model is built on.\n\n2  ①②③④⑤ is the impulse, ⒶⒷⒸ the correction that follows. Hover any of them for what that wave is, how far it went, which rule it has to respect and what its subwaves say.\n\n3  THE SMALL 5 AND 3 on each leg are the subwave verdict. A motive wave subdivides into five, a corrective wave into three - and corrections are never fives. Grey means the subdivision agrees with the label, gold means it disagrees and the count deserves a second look.\n\n4  SHADED ZONE = where the correction is expected to end. Wave 2: 50 - 61.8 % of wave 1. Wave 4: 23.6 - 50 % of wave 3.\n\n5  THE GREEN LINE marked '④ of lesser degree' is the depth guideline: fourth waves tend to bottom inside the span of the previous fourth wave one degree smaller. It is often the better target than any percentage.\n\n6  THE CHANNEL is built the way the source builds it - 1 to 3 with a parallel through 2 while wave 4 forms, then 2 to 4 with a parallel through the peak of 3 to forecast wave 5. A break of the upper line is a THROW-OVER, and that is a terminal signal.\n\n7  +FVG = a fair value gap inside the entry zone. The confluence that turns a level into a trade.\n\n8  PILL = the signal, with every reason behind it in the tooltip plus entry, stop, both targets and the R multiple.\n\n9  COUNT INVALID = a golden rule broke. The count is not weakened, it is dead. The panel already names the alternate reading and the price at which the primary one dies.\n\n10  Faded gold skeletons in the history are finished counts, frozen where they were found, so you can scroll back and study them.")
-    cardB := label.new(bar_index + 14, lo300, "BEFORE YOU TRADE THIS", style = label.style_label_left, color = color.new(cSect, 12), textcolor = cCyan, size = size.small, tooltip = "HONEST EXPECTATIONS\n\n· Elliott Wave is not a standalone technique, and its subjective nature has put a lot of traders off it. Two competent analysts label the same chart differently, and both can be inside the rules. This indicator picks ONE reading, names the most likely alternative, and tells you the exact price at which the primary reading dies. It does not pretend the ambiguity is gone - the source itself calls the whole exercise a way of ordering probabilities, not of producing certainty.\n\n· THE COUNT RE-READS ITSELF ON EVERY NEW PIVOT, and the newest pivot is only confirmed after the pivot strength has elapsed. That means labels move. Every honest Elliott tool repaints in this sense; one that never changed its mind would simply be ignoring the market. Judge a count by whether it was invalidated, not by whether it stayed still.\n\n· THE TWO PIVOT STRENGTHS DECIDE EVERYTHING. The coarse one sets the degree you are counting; the fine one decides whether a leg reads as a five or a three. If the subwave column shows nothing but dots, the finer zigzag is too coarse for this timeframe - lower it.\n\n· The percentages are averages, not laws. Corrections come in slightly smaller and slightly larger than the textbook numbers all the time. The 23.6 % wave 4 in particular is an empirical addition, not one of the ratios the original ratio analysis lists.\n\n· Wave counts cannot be backtested the way a moving average cross can, because the labelling itself is a judgement. Anything that claims a hit rate for Elliott Wave has quietly fixed one counting rule and measured that instead.\n\n· The win / loss counter is a rough on-chart tracker. It assumes a fill at the marked price and resolves target before stop inside the same bar. It is not a backtest and it is not a performance claim.\n\nThis indicator is a study tool. It is not financial advice.")
+    cardB := label.new(bar_index + 14, lo300, "BEFORE YOU TRADE THIS", style = label.style_label_left, color = color.new(cSect, 12), textcolor = cCyan, size = size.small, tooltip = "HONEST EXPECTATIONS\n\n· Elliott Wave is not a standalone technique, and its subjective nature has put a lot of traders off it. Two competent analysts label the same chart differently, and both can be inside the rules. This indicator picks ONE reading, names the most likely alternative, and tells you the exact price at which the primary reading dies. It does not pretend the ambiguity is gone - the source itself calls the whole exercise a way of ordering probabilities, not of producing certainty.\n\n· THE COUNT RE-READS ITSELF ON EVERY NEW PIVOT, and the newest pivot is only confirmed after the pivot strength has elapsed. That means labels move. Every honest Elliott tool repaints in this sense; one that never changed its mind would simply be ignoring the market. Judge a count by whether it was invalidated, not by whether it stayed still.\n\n· THE TWO PIVOT STRENGTHS DECIDE EVERYTHING. The coarse one sets the degree you are counting; the fine one decides whether a leg reads as a five or a three. If the subwave column shows nothing but dots, the finer zigzag is too coarse for this timeframe - lower it.\n\n· The percentages are averages, not laws. Corrections come in slightly smaller and slightly larger than the textbook numbers all the time. The 23.6 % wave 4 in particular is an empirical addition, not one of the ratios the original ratio analysis lists.\n\n· Wave counts cannot be backtested the way a moving average cross can, because the labelling itself is a judgement. Anything that claims a hit rate for Elliott Wave has quietly fixed one counting rule and measured that instead.\n\n· The win / loss counter is a rough on-chart tracker. It assumes a fill at the marked price and resolves target before stop inside the same bar. Break-even only protects from the bar AFTER it was reached. A trade whose count dies underneath it is closed at that bar's close and counted under INV - it does not disappear from the record. It is not a backtest and it is not a performance claim.\n\nThis indicator is a study tool. It is not financial advice.")
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
 //  PANEL ANIMATION TICKER
@@ -1403,11 +1549,14 @@ f_markc(bool ok, bool known) => not known ? cGrey : ok ? cMint : cRed
 //  The source is blunt about this: applying the Wave Principle is an exercise in
 //  probability, and keeping alternatives alive is part of using it correctly.
 //  The short strings keep the table narrow; the full reasoning sits in the cell tooltips.
-altTxt = wStage == 0 ? "—" : wStage == 2 ? "① ② may be Ⓐ Ⓑ — this leg is Ⓒ" : wStage == 4 ? (isDiag ? "may still be a 1-2-1-2 series" : "① - ④ may be Ⓐ Ⓑ Ⓒ of a flat") : wStage == 5 ? (wTrunc ? "truncation may be a failed count" : "the five may be ① of a larger degree") : "Ⓐ Ⓑ Ⓒ may extend into a W-X-Y"
-altTip = wStage == 0 ? "No count is on the chart, so there is nothing to argue with yet." : wStage == 2 ? "Waves ① and ② could just as well be Ⓐ and Ⓑ of a zigzag. In that reading the leg running now is Ⓒ, not ③, and it ends the correction instead of starting a trend." : wStage == 4 ? (isDiag ? "A wedge whose fourth wave overlaps the first is far more often a 1-2-1-2 series of one lesser degree than a true diagonal. Treat the diagonal reading as the weaker of the two until wave ⑤ confirms it." : "Waves ① to ④ could be Ⓐ Ⓑ Ⓒ of a flat correction. Then what looks like ⑤ is not a fifth wave at all but the opening leg of the next pattern.") : wStage == 5 ? (wTrunc ? "A truncated fifth is rare. Before accepting it, check that the fifth really carries five subwaves of its own — otherwise the count is simply wrong." : "A finished five can always be wave ① of one larger degree. The correction that follows would then be ② of that larger degree, not the end of the move.") : "Corrections rarely stop at a single Ⓐ Ⓑ Ⓒ. A double three (W-X-Y) or triple three (W-X-Y-X-Z) is the normal way a sideways phase stretches out in time."
-altPx  = wStage == 0 ? float(na) : wStage >= 4 ? (isDiag ? p2 : p1) : p0
-altWhy = wStage == 0 ? "" : wStage >= 4 ? (isDiag ? "rule 3 · ④ overlaps ① but not ②" : "rule 3 · ④ may not enter ①") : "rule 2 · ② may not pass ①'s start"
-altWTip = wStage == 0 ? "" : wStage >= 4 ? (isDiag ? "Wave 4 of a diagonal is allowed to overlap wave 1 — that overlap is what makes it a diagonal. It may never travel beyond the end of wave 2. If it does, the diagonal reading is dead." : "Wave 4 may not enter the price territory of wave 1. The moment it does, this is not an impulse and the whole count has to be redrawn.") : "Wave 2 may never retrace more than one hundred percent of wave 1. Trading past the start of wave 1 kills the count outright."
+altTxt = wStage == 0 ? "—" : wStage == 2 ? "① ② may be Ⓐ Ⓑ — this leg is Ⓒ" : wStage == 3 ? "① ② ③ may be a finished Ⓐ Ⓑ Ⓒ" : wStage == 4 ? (isDiag ? "may still be a 1-2-1-2 series" : "① - ④ may be Ⓐ Ⓑ Ⓒ of a flat") : wStage == 5 ? (wTrunc ? "truncation may be a failed count" : "the five may be ① of a larger degree") : "Ⓐ Ⓑ Ⓒ may extend into a W-X-Y"
+altTip = wStage == 0 ? "No count is on the chart, so there is nothing to argue with yet." : wStage == 2 ? "Waves ① and ② could just as well be Ⓐ and Ⓑ of a zigzag. In that reading the leg running now is Ⓒ, not ③, and it ends the correction instead of starting a trend." : wStage == 3 ? "Three legs that look like ① ② ③ are also exactly what a finished zigzag Ⓐ Ⓑ Ⓒ looks like. In that reading the move running now is not a fourth wave but the start of the next trend in the other direction - which is why the count dies the moment wave 4 enters wave 1's territory." : wStage == 4 ? (isDiag ? "A wedge whose fourth wave overlaps the first is far more often a 1-2-1-2 series of one lesser degree than a true diagonal. Treat the diagonal reading as the weaker of the two until wave ⑤ confirms it." : "Waves ① to ④ could be Ⓐ Ⓑ Ⓒ of a flat correction. Then what looks like ⑤ is not a fifth wave at all but the opening leg of the next pattern.") : wStage == 5 ? (wTrunc ? "A truncated fifth is rare. Before accepting it, check that the fifth really carries five subwaves of its own — otherwise the count is simply wrong." : "A finished five can always be wave ① of one larger degree. The correction that follows would then be ② of that larger degree, not the end of the move.") : "Corrections rarely stop at a single Ⓐ Ⓑ Ⓒ. A double three (W-X-Y) or triple three (W-X-Y-X-Z) is the normal way a sideways phase stretches out in time."
+//  where the PRIMARY count dies.  For a finished structure that is no longer a golden rule:
+//  the correction is allowed to run back through waves 1 and 2.  What would prove the five
+//  was NOT finished is a new extreme beyond wave 5.
+altPx  = wStage == 0 ? float(na) : wStage >= 5 ? p5 : wStage == 4 ? (isDiag ? p2 : p1) : wStage == 3 ? (i_diagOn ? p2 : p1) : p0
+altWhy = wStage == 0 ? "" : wStage >= 5 ? "beyond ⑤ · the five was not finished" : wStage == 4 ? (isDiag ? "rule 3 · ④ overlaps ① but not ②" : "rule 3 · ④ may not enter ①") : wStage == 3 ? (i_diagOn ? "④ may not pass ② (diagonal limit)" : "rule 3 · ④ may not enter ①") : "rule 2 · ② may not pass ①'s start"
+altWTip = wStage == 0 ? "" : wStage >= 5 ? "The impulse is labelled finished. The correction that follows may run back through waves 1 and 2 - that does not break any rule. What WOULD prove the label wrong is price making a new extreme beyond the end of wave 5: then wave 5 was still extending, or the whole five was only part of a larger move." : wStage >= 3 and (isDiag or (wStage == 3 and i_diagOn)) ? "Wave 4 of a diagonal is allowed to overlap wave 1 — that overlap is what makes it a diagonal. It may never travel beyond the end of wave 2. If it does, neither the impulse nor the diagonal reading survives." : wStage >= 3 ? "Wave 4 may not enter the price territory of wave 1. The moment it does, this is not an impulse and the whole count has to be redrawn." : "Wave 2 may never retrace more than one hundred percent of wave 1. Trading past the start of wave 1 kills the count outright."
 
 subLine = (na(p1) ? "" : f_deg(1) + " " + sub1) + (na(p2) ? "" : "   " + f_deg(2) + " " + sub2) + (na(p3) ? "" : "   " + f_deg(3) + " " + sub3) + (na(p4) ? "" : "   " + f_deg(4) + " " + sub4) + (na(p5) ? "" : "   " + f_deg(5) + " " + sub5)
 formLine = wForm + (wTrunc ? "  ·  TRUNCATED ⑤" : "") + (w4Tri ? "  ·  ④ TRIANGLE" : "") + (volExt ? "  ·  ⑤ EXTENDING" : "")
@@ -1450,7 +1599,7 @@ if i_panOn and barstate.islast
     table.cell(pan, 0, 2, anim, text_color = cMint, text_size = size.tiny, bgcolor = cPanel)
     table.merge_cells(pan, 0, 2, 7, 2)
 
-    string stgTxt = wStage == 0 ? "NO VALID COUNT" : wStage == 2 ? (wDir == 1 ? "WAVE " + f_deg(3) + " RUNNING  ▲" : "WAVE " + f_deg(3) + " RUNNING  ▼") : wStage == 4 ? (wDir == 1 ? "WAVE " + f_deg(5) + " RUNNING  ▲" : "WAVE " + f_deg(5) + " RUNNING  ▼") : wStage == 5 ? (isDiag ? str.upper(wForm) + " COMPLETE" : "IMPULSE COMPLETE · " + f_deg(6) + " NEXT") : wStage == 6 ? "CORRECTION · " + f_deg(7) + " RUNNING" : wStage == 7 ? "CORRECTION · " + f_deg(8) + " RUNNING" : "ABC COMPLETE"
+    string stgTxt = wStage == 0 ? "NO VALID COUNT" : wStage == 2 ? (wDir == 1 ? "WAVE " + f_deg(3) + " RUNNING  ▲" : "WAVE " + f_deg(3) + " RUNNING  ▼") : wStage == 3 ? "WAVE " + f_deg(4) + " RUNNING  ·  correction" : wStage == 4 ? (wDir == 1 ? "WAVE " + f_deg(5) + " RUNNING  ▲" : "WAVE " + f_deg(5) + " RUNNING  ▼") : wStage == 5 ? (isDiag ? str.upper(wForm) + " COMPLETE" : "IMPULSE COMPLETE · " + f_deg(6) + " NEXT") : wStage == 6 ? "CORRECTION · " + f_deg(7) + " RUNNING" : wStage == 7 ? "CORRECTION · " + f_deg(8) + " RUNNING" : "ABC COMPLETE"
     color stgCol = wStage == 0 ? cGrey : wStage >= 5 ? cPink : wDir == 1 ? cMint : cRed
     table.cell(pan, 0, 3, stgTxt, text_color = stgCol, text_size = psz, bgcolor = cSect)
     table.merge_cells(pan, 0, 3, 7, 3)
@@ -1526,7 +1675,7 @@ if i_panOn and barstate.islast
         table.cell(pan, 0, rMeasHdr, "MEASURED AGAINST THE MODEL", text_color = cGold, text_size = size.tiny, bgcolor = cSect, text_halign = text.align_left)
         table.merge_cells(pan, 0, rMeasHdr, 7, rMeasHdr)
         mTxt = array.from("W2 retrace   50 / 61.8", "W3 extension   161.8 / 261.8", "W4 retrace   23.6 / 38.2 / 50", w4Tri ? "W5 thrust   width of ④" : "W5 target   =  W1")
-        mVal = array.from(f_pct(w2Depth), f_pct(w3Ext), f_pct(w4Depth), w4Tri ? f_px(w5_thrust) : f_px(w5_t1))
+        mVal = array.from(f_pct(w2Depth), f_pct(w3Ext), f_pct(w4Depth), w4Tri ? f_px(w5_thrust) : f_px(w5_tp1))
         mCol = array.from(na(w2Depth) ? cGrey : w2Sweet ? cMint : cGold, na(w3Ext) ? cGrey : w3Ext >= i_w3t1 * 0.9 ? cMint : cGold, na(w4Depth) ? cGrey : w4Sweet ? cMint : cGold, na(w5_t1) and na(w5_thrust) ? cGrey : cMint)
         for r = 0 to 3
             table.cell(pan, 0, rMeasHdr + 1 + r, array.get(mTxt, r), text_color = cGrey, text_size = size.tiny, bgcolor = cPanel, text_halign = text.align_left)
@@ -1555,8 +1704,8 @@ if i_panOn and barstate.islast
     table.cell(pan, 0, rChkHdr, "SETUP CHECKLIST", text_color = cGold, text_size = size.tiny, bgcolor = cSect, text_halign = text.align_left)
     table.merge_cells(pan, 0, rChkHdr, 7, rChkHdr)
     kTxt = array.from("❶ Valid count", "❷ Correction in its fib zone", "❸ Rules intact", "❹ +FVG confluence", "❺ Trigger fired")
-    kOk  = array.from(wStage > 0, (wStage == 2 and w2Sweet) or (wStage == 4 and w4Sweet), wStage > 0 and R1 and R2 and R3 and not invNow, not na(g2t) or not na(g4t), tLive)
-    kRun = array.from(false, wStage == 2 or wStage == 4, false, false, setup3 or setup5)
+    kOk  = array.from(wStage > 0, (wStage == 2 and w2Sweet) or (wStage == 4 and w4Sweet), wStage > 0 and R1 and R2 and R3 and not cntDeadNow, not na(g2t) or not na(g4t), tLive)
+    kRun = array.from(false, wStage >= 2 and wStage <= 4, false, false, setup3 or setup5)
     for r = 0 to 4
         table.cell(pan, 0, rChkHdr + 1 + r, array.get(kTxt, r), text_color = cTxt, text_size = size.tiny, bgcolor = cPanel, text_halign = text.align_left)
         table.merge_cells(pan, 0, rChkHdr + 1 + r, 5, rChkHdr + 1 + r)
@@ -1567,20 +1716,24 @@ if i_panOn and barstate.islast
     table.cell(pan, 0, rPos, posTxt, text_color = tLive ? cGold : cGrey, text_size = size.tiny, bgcolor = cSect)
     table.merge_cells(pan, 0, rPos, 7, rPos)
 
-    string sigTxt = invNow ? "COUNT INVALID" : tState == "TP1 HIT" ? "TP HIT" : tState == "SL HIT" ? "SL HIT" : tState == "BREAK EVEN" ? "BREAK EVEN" : tLive ? (tDir == 1 ? "LONG RUNNING" : "SHORT RUNNING") : setup3 or setup5 ? "ARMED · WAIT TRIGGER" : wStage == 2 or wStage == 4 ? "HUNTING" : wStage > 0 ? "COUNTING" : "NO COUNT"
-    color sigCol = invNow ? cRed : tState == "TP1 HIT" ? cMint : tState == "SL HIT" ? cRed : tLive ? cGold : setup3 or setup5 ? cCyan : cGrey
+    string sigTxt = cntDeadNow ? "COUNT INVALID" : tState == "TP1 HIT" ? "TP HIT" : tState == "SL HIT" ? "SL HIT" : tState == "BREAK EVEN" ? "BREAK EVEN" : tLive ? (tDir == 1 ? "LONG RUNNING" : "SHORT RUNNING") : setup3 or setup5 ? "ARMED · WAIT TRIGGER" : wStage >= 2 and wStage <= 4 ? "HUNTING" : wStage > 0 ? "COUNTING" : "NO COUNT"
+    color sigCol = cntDeadNow ? cRed : tState == "TP1 HIT" ? cMint : tState == "SL HIT" ? cRed : tLive ? cGold : setup3 or setup5 ? cCyan : cGrey
     table.cell(pan, 0, rSig, sigTxt, text_color = sigCol, text_size = size.large, bgcolor = cPanel)
     table.merge_cells(pan, 0, rSig, 7, rSig)
 
-    string ftr = (na(lastSigT) ? "● LIVE  ·  webhook JSON ready" : "LAST  " + lastSigS + "  ·  " + str.format_time(lastSigT, "dd MMM HH:mm")) + "   ·   W " + str.tostring(wins) + "  L " + str.tostring(losses) + "  BE " + str.tostring(bes)
+    string ftr = (na(lastSigT) ? "● LIVE  ·  webhook JSON ready" : "LAST  " + lastSigS + "  ·  " + str.format_time(lastSigT, "dd MMM HH:mm")) + "   ·   W " + str.tostring(wins) + "  L " + str.tostring(losses) + "  BE " + str.tostring(bes) + "  INV " + str.tostring(invs)
     table.cell(pan, 0, rFtr, ftr, text_color = cCyan, text_size = size.tiny, bgcolor = cPanel)
     table.merge_cells(pan, 0, rFtr, 7, rFtr)
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
 //  WEBHOOK / ALERTS
 // ═════════════════════════════════════════════════════════════════════════════════════════
+//  every free-text field is escaped, so a quote or a backslash typed into a setting cannot
+//  break the payload
+f_esc(string s) => str.replace_all(str.replace_all(s, "\\", "\\\\"), '"', '\\"')
+
 f_json(string ev, string side, int wv, float ent, float sl, float tp1, float tp2, string note) =>
-    '{"strategy":"' + i_hookId + '","event":"' + ev + '","side":"' + side + '","wave":"' + (wv == 7 ? "C" : str.tostring(wv)) + '","symbol":"' + syminfo.ticker + '","exchange":"' + syminfo.prefix + '","tf":"' + timeframe.period + '","price":' + str.tostring(close, format.mintick) + ',"entry":' + (na(ent) ? "null" : str.tostring(ent, format.mintick)) + ',"sl":' + (na(sl) ? "null" : str.tostring(sl, format.mintick)) + ',"tp1":' + (na(tp1) ? "null" : str.tostring(tp1, format.mintick)) + ',"tp2":' + (na(tp2) ? "null" : str.tostring(tp2, format.mintick)) + ',"volume":"' + i_hookLot + '","account":"' + i_hookAcc + '","count":"' + (wDir == 1 ? "bull" : wDir == -1 ? "bear" : "none") + '","w2_retrace":' + (na(w2Depth) ? "null" : str.tostring(w2Depth, "#.00")) + ',"w3_ext":' + (na(w3Ext) ? "null" : str.tostring(w3Ext, "#.00")) + ',"w4_retrace":' + (na(w4Depth) ? "null" : str.tostring(w4Depth, "#.00")) + ',"rules":"' + (R1 ? "1" : "0") + (R2 ? "1" : "0") + (R3 ? "1" : "0") + '","guides":"' + (G1 ? "1" : "0") + (G2 ? "1" : "0") + (G3 ? "1" : "0") + (G4 ? "1" : "0") + (G5 ? "1" : "0") + '","form":"' + wForm + '","truncated":' + (wTrunc ? "true" : "false") + ',"w4_triangle":' + (w4Tri ? "true" : "false") + ',"vol_extension":' + (volExt ? "true" : "false") + ',"subdiv":"' + sub1 + sub2 + sub3 + sub4 + sub5 + '","pattern":"' + corrKind + '","alt_invalid":' + (na(altPx) ? "null" : str.tostring(altPx, format.mintick)) + ',"fvg":' + (tConf == "+FVG" ? "true" : "false") + ',"rr":' + (na(tRR) ? "null" : str.tostring(tRR, "#.00")) + ',"note":"' + note + '","time":' + str.tostring(time) + '}'
+    '{"strategy":"' + f_esc(i_hookId) + '","event":"' + ev + '","side":"' + side + '","wave":"' + (wv == 7 ? "C" : str.tostring(wv)) + '","symbol":"' + syminfo.ticker + '","exchange":"' + syminfo.prefix + '","tf":"' + timeframe.period + '","price":' + str.tostring(close, format.mintick) + ',"entry":' + (na(ent) ? "null" : str.tostring(ent, format.mintick)) + ',"sl":' + (na(sl) ? "null" : str.tostring(sl, format.mintick)) + ',"tp1":' + (na(tp1) ? "null" : str.tostring(tp1, format.mintick)) + ',"tp2":' + (na(tp2) ? "null" : str.tostring(tp2, format.mintick)) + ',"volume":"' + f_esc(i_hookLot) + '","account":"' + f_esc(i_hookAcc) + '","count":"' + (wDir == 1 ? "bull" : wDir == -1 ? "bear" : "none") + '","w2_retrace":' + (na(w2Depth) ? "null" : str.tostring(w2Depth, "#.00")) + ',"w3_ext":' + (na(w3Ext) ? "null" : str.tostring(w3Ext, "#.00")) + ',"w4_retrace":' + (na(w4Depth) ? "null" : str.tostring(w4Depth, "#.00")) + ',"rules":"' + (R1 ? "1" : "0") + (R2 ? "1" : "0") + (R3 ? "1" : "0") + '","guides":"' + (G1 ? "1" : "0") + (G2 ? "1" : "0") + (G3 ? "1" : "0") + (G4 ? "1" : "0") + (G5 ? "1" : "0") + '","form":"' + f_esc(wForm) + '","truncated":' + (wTrunc ? "true" : "false") + ',"w4_triangle":' + (w4Tri ? "true" : "false") + ',"vol_extension":' + (volExt ? "true" : "false") + ',"subdiv":"' + sub1 + sub2 + sub3 + sub4 + sub5 + '","pattern":"' + f_esc(corrKind) + '","alt_invalid":' + (na(altPx) ? "null" : str.tostring(altPx, format.mintick)) + ',"fvg":' + (tConf == "+FVG" ? "true" : "false") + ',"rr":' + (na(tRR) ? "null" : str.tostring(tRR, "#.00")) + ',"note":"' + f_esc(note) + '","time":' + str.tostring(time) + '}'
 
 if i_hookOn and fireNow
     alert(f_json("ENTRY", tDir == 1 ? "BUY" : "SELL", tWave, tEnt, tSl, tTp1, tTp2, "elliott wave entry"), alert.freq_once_per_bar_close)
@@ -1588,11 +1741,25 @@ if i_hookOn and hitTp
     alert(f_json("TP1", tDir == 1 ? "BUY" : "SELL", tWave, tEnt, tSl, tTp1, tTp2, "target reached"), alert.freq_once_per_bar_close)
 if i_hookOn and hitSl
     alert(f_json("SL", tDir == 1 ? "BUY" : "SELL", tWave, tEnt, tSl, tTp1, tTp2, "stop hit"), alert.freq_once_per_bar_close)
+//  BE_MOVE  = the stop is now at entry, the position stays OPEN  -> modify the stop
+//  BE_EXIT  = price came back to entry after BE_MOVE, the position is CLOSED
+//  CLOSE    = the count died under an open trade, the position is CLOSED at market
+if i_hookOn and beMove and tLive
+    alert(f_json("BE_MOVE", tDir == 1 ? "BUY" : "SELL", tWave, tEnt, tEnt, tTp1, tTp2, "stop moved to break even, position stays open"), alert.freq_once_per_bar_close)
 if i_hookOn and hitBe
-    alert(f_json("BE", tDir == 1 ? "BUY" : "SELL", tWave, tEnt, tEnt, tTp1, tTp2, "moved to break even"), alert.freq_once_per_bar_close)
+    alert(f_json("BE_EXIT", tDir == 1 ? "BUY" : "SELL", tWave, tEnt, tEnt, tTp1, tTp2, "closed at break even"), alert.freq_once_per_bar_close)
+if i_hookOn and hitInv
+    alert(f_json("CLOSE", tDir == 1 ? "BUY" : "SELL", tWave, tEnt, tSl, tTp1, tTp2, "close at market - " + invMsg), alert.freq_once_per_bar_close)
+//  the kill latches, so this fires once per dead count
 if i_hookOn and invNow
     alert(f_json("INVALID", "NONE", 0, na, na, na, na, invMsg), alert.freq_once_per_bar_close)
-if i_hookOn and zzNew and wStage == 5
+//  structure events fire when they first appear, not again every time the last pivot extends
+impNew = zzNew and wStage == 5 and (wStage[1] != 5 or x0 != x0[1])
+truNew = zzNew and wTrunc and (not wTrunc[1] or x0 != x0[1])
+triNew = zzNew and w4Tri and (not w4Tri[1] or x0 != x0[1])
+diaNew = zzNew and isDiag and wStage >= 4 and (wForm[1] == "IMPULSE" or x0 != x0[1])
+extNew = volExt and not volExt[1]
+if i_hookOn and impNew
     alert(f_json("IMPULSE_COMPLETE", "NONE", 5, na, na, na, na, "five wave impulse finished, abc expected"), alert.freq_once_per_bar_close)
 
 alertcondition(fireNow and tDir == 1 and tWave == 3, "BUY · wave 3", "ELLIOTT WAVE RULE CHECKER: BUY - wave 2 finished inside its fibonacci zone, wave 3 expected")
@@ -1600,11 +1767,13 @@ alertcondition(fireNow and tDir == -1 and tWave == 3, "SELL · wave 3", "ELLIOTT
 alertcondition(fireNow and tDir == 1 and tWave == 5, "BUY · wave 5", "ELLIOTT WAVE RULE CHECKER: BUY - wave 4 finished inside its fibonacci zone, wave 5 expected")
 alertcondition(fireNow and tDir == -1 and tWave == 5, "SELL · wave 5", "ELLIOTT WAVE RULE CHECKER: SELL - wave 4 finished inside its fibonacci zone, wave 5 expected")
 alertcondition(invNow, "Count invalidated", "ELLIOTT WAVE RULE CHECKER: a golden rule broke, the wave count is no longer valid")
-alertcondition(zzNew and wStage == 5, "Impulse complete", "ELLIOTT WAVE RULE CHECKER: the five wave impulse is finished, an ABC correction is expected")
-alertcondition(zzNew and isDiag and wStage >= 4, "Diagonal detected", "ELLIOTT WAVE RULE CHECKER: a diagonal is in place - wave 4 overlaps wave 1. Expect a sharp move back to where the diagonal began")
-alertcondition(zzNew and wTrunc, "Truncated fifth", "ELLIOTT WAVE RULE CHECKER: wave 5 failed to pass wave 3 - a truncated fifth, which implies a dramatic reversal ahead")
-alertcondition(zzNew and w4Tri, "Wave 4 triangle", "ELLIOTT WAVE RULE CHECKER: wave 4 is a contracting triangle - expect the thrust, a swift wave 5 roughly the width of the triangle")
-alertcondition(volExt, "Fifth wave extension warning", "ELLIOTT WAVE RULE CHECKER: volume in wave 5 has reached wave 3 levels - the volume guideline reads that as a fifth wave extension in force")
+alertcondition(hitInv, "Trade closed · count invalid", "ELLIOTT WAVE RULE CHECKER: the count died under an open trade - close the position")
+alertcondition(beMove and tLive, "Stop to break even", "ELLIOTT WAVE RULE CHECKER: the trade reached the break-even trigger - move the stop to entry")
+alertcondition(impNew, "Impulse complete", "ELLIOTT WAVE RULE CHECKER: the five wave impulse is finished, an ABC correction is expected")
+alertcondition(diaNew, "Diagonal detected", "ELLIOTT WAVE RULE CHECKER: a diagonal is in place - wave 4 overlaps wave 1. Expect a sharp move back to where the diagonal began")
+alertcondition(truNew, "Truncated fifth", "ELLIOTT WAVE RULE CHECKER: wave 5 failed to pass wave 3 - a truncated fifth, which implies a dramatic reversal ahead")
+alertcondition(triNew, "Wave 4 triangle", "ELLIOTT WAVE RULE CHECKER: wave 4 is a contracting triangle - expect the thrust, a swift wave 5 roughly the width of the triangle")
+alertcondition(extNew, "Fifth wave extension warning", "ELLIOTT WAVE RULE CHECKER: volume in wave 5 has reached wave 3 levels - the volume guideline reads that as a fifth wave extension in force")
 
 plot(wStage > 0 ? p0 : na, "Wave 0", color.new(cGrey, 100), display = display.data_window)
 plot(wStage > 0 ? p1 : na, "Wave 1", color.new(cGold, 100), display = display.data_window)
