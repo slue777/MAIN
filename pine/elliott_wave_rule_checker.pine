@@ -1259,8 +1259,10 @@ trendCol = wDir == 1 ? cMint : cRed
 dimCol   = wDir == 1 ? color.new(cMint, 40) : color.new(cRed, 40)
 newId    = str.tostring(x0) + "|" + str.tostring(wDir)
 
-if zzNew and wStage > 0 and (i_showSkel or i_showLbl)
-    if newId != acId
+//  draws the current count; fresh = it is a different count, so the previous drawing is
+//  frozen in gold as history instead of being deleted
+f_drawCount(bool fresh) =>
+    if fresh
         // a different count: freeze the previous drawing in gold instead of deleting it
         if array.size(acL) > 0
             for k = 0 to array.size(acL) - 1
@@ -1277,7 +1279,6 @@ if zzNew and wStage > 0 and (i_showSkel or i_showLbl)
                 label.set_size(ob, size.tiny)
                 array.push(hsB, ob)
             array.clear(acB)
-        acId := newId
         while array.size(hsL) > math.max(i_histN, 0) * 10
             line.delete(array.shift(hsL))
         while array.size(hsB) > math.max(i_histN, 0) * 10
@@ -1339,6 +1340,11 @@ if zzNew and wStage > 0 and (i_showSkel or i_showLbl)
             f_wave(xB, pB, f_deg(7), up, cPink, "WAVE B" + sx + (i_subTag ? subB : "") + "\nRetraced " + f_pct(na(pA) or na(p5) ? float(na) : math.abs(pB - pA) / math.max(math.abs(pA - p5), syminfo.mintick) * 100.0) + " of wave A.\n\nIn a zigzag, wave B typically retraces 38 - 79 % of wave A.\nIn a flat, wave B must retrace AT LEAST 90 % of wave A - that one is a rule, not a guideline - and usually lands between 100 and 138 %.\n\nB waves are sucker plays. The crowd believes the old trend has resumed. And a warning from the source: if wave B breaks down into five waves rather than three, it is more likely the first wave of the next impulse, not a B at all.")
         if i_abcOn and not na(pC)
             f_wave(xC, pC, f_deg(8), not up, cPink, "WAVE C" + sx + (i_subTag ? subC : "") + "\n" + (corrKind == "" ? "" : "PATTERN: " + corrKind + "\n") + "\nIn a zigzag, wave C usually equals wave A, and is not uncommonly 1.618 or 0.618 times its length.\nIn a regular flat, A, B and C are approximately equal. In an expanded flat, wave C is often 1.618 times wave A.\n\nDEPTH · after a five wave impulse advance the A-B-C commonly ends near the prior extreme of wave 4 (" + f_px(p4) + ") — " + (G3 ? "satisfied, it landed there." : "it did not land there this time."))
+    0
+
+if zzNew and wStage > 0 and (i_showSkel or i_showLbl)
+    f_drawCount(newId != acId)
+    acId := newId
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
 //  LIVE LAYER  ·  fibonacci, zones, +FVG and the projection of the unfinished wave
@@ -1355,7 +1361,7 @@ f_fibLine(int b1, float y, string txt, color col, bool bold, string tip) =>
         array.push(dyB, lb)
     0
 
-if barstate.islast
+f_drawLive() =>
     f_killL(dyL)
     f_killB(dyB)
     f_killX(dyX)
@@ -1470,6 +1476,10 @@ if barstate.islast
             for k = 1 to lastN
                 if array.get(sB, k) >= x0
                     array.push(dyL, line.new(array.get(sB, k - 1), array.get(sP, k - 1), array.get(sB, k), array.get(sP, k), color = color.new(cGrey, 62), width = 1, style = line.style_solid))
+    0
+
+if barstate.islast
+    f_drawLive()
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
 //  EVENT TAGS + SIGNAL PILLS
@@ -1495,8 +1505,10 @@ if i_eduEv and wStage == 4 and w4Sweet and not na(x4) and bar_index == x4 + i_zz
 pillSz = f_sizeOf(i_pillSz)
 tSide  = tDir == 1 ? "BUY" : "SELL"
 string whyTxt = ""
+f_why() => "WHY THIS " + tSide + "?\n1) The count is a valid " + (wDir == 1 ? "bullish" : "bearish") + " impulse:  " + f_px(p0) + " → " + f_px(p1) + " → " + f_px(p2) + (na(p3) ? "" : "  →  " + f_px(p3) + " → " + f_px(p4)) + "\n2) All three golden rules hold: wave 3 " + (strictR1 ? "is the longest" : "is not the shortest") + " ✓, wave 2 did not surpass the start of wave 1 ✓, wave 4 did not overlap wave 1 ✓\n3) " + (tWave == 3 ? "Wave 2 retraced " + f_pct(w2Depth) + " of wave 1 - the typical values are 50.0 % and 61.8 %, the average is 60 %." : tWave == 5 ? "Wave 4 retraced " + f_pct(w4Depth) + " of wave 3 - the typical values are 23.6 %, 38.2 % and 50.0 %, the average is 30 - 40 %." : "The five wave impulse is finished and the ABC correction is starting.") + "\n4) Guidelines:  wave 5 ≈ wave 1 " + (G1 ? "✓" : "·") + "   ·   alternation " + t2Kind + " / " + (t4Kind == "" ? "?" : t4Kind) + " " + (G2 ? "✓" : "·") + "   ·   ABC into the wave 4 extreme " + (G3 ? "✓" : "·") + "\n5) " + (tConf == "+FVG" ? "A fair value gap sits inside the entry zone - the +FVG confluence." : "No fair value gap inside the zone, the entry rests on the fibonacci zone alone.") + "\n6) The trade runs WITH the impulse. Corrective waves are where you enter, impulse waves are where you get paid.\n\nENTRY " + f_px(tEnt) + "    SL " + f_px(tSl) + "    TP1 " + f_px(tTp1) + (na(tTp2) ? "" : "    TP2 " + f_px(tTp2)) + "\nRisk " + f_pips(tEnt - tSl) + " pips    Reward " + f_pips(tTp1 - tEnt) + " pips    " + str.tostring(tRR, "#.00") + "R"
+
 if fireNow
-    whyTxt := "WHY THIS " + tSide + "?\n1) The count is a valid " + (wDir == 1 ? "bullish" : "bearish") + " impulse:  " + f_px(p0) + " → " + f_px(p1) + " → " + f_px(p2) + (na(p3) ? "" : "  →  " + f_px(p3) + " → " + f_px(p4)) + "\n2) All three golden rules hold: wave 3 " + (strictR1 ? "is the longest" : "is not the shortest") + " ✓, wave 2 did not surpass the start of wave 1 ✓, wave 4 did not overlap wave 1 ✓\n3) " + (tWave == 3 ? "Wave 2 retraced " + f_pct(w2Depth) + " of wave 1 - the typical values are 50.0 % and 61.8 %, the average is 60 %." : tWave == 5 ? "Wave 4 retraced " + f_pct(w4Depth) + " of wave 3 - the typical values are 23.6 %, 38.2 % and 50.0 %, the average is 30 - 40 %." : "The five wave impulse is finished and the ABC correction is starting.") + "\n4) Guidelines:  wave 5 ≈ wave 1 " + (G1 ? "✓" : "·") + "   ·   alternation " + t2Kind + " / " + (t4Kind == "" ? "?" : t4Kind) + " " + (G2 ? "✓" : "·") + "   ·   ABC into the wave 4 extreme " + (G3 ? "✓" : "·") + "\n5) " + (tConf == "+FVG" ? "A fair value gap sits inside the entry zone - the +FVG confluence." : "No fair value gap inside the zone, the entry rests on the fibonacci zone alone.") + "\n6) The trade runs WITH the impulse. Corrective waves are where you enter, impulse waves are where you get paid.\n\nENTRY " + f_px(tEnt) + "    SL " + f_px(tSl) + "    TP1 " + f_px(tTp1) + (na(tTp2) ? "" : "    TP2 " + f_px(tTp2)) + "\nRisk " + f_pips(tEnt - tSl) + " pips    Reward " + f_pips(tTp1 - tEnt) + " pips    " + str.tostring(tRR, "#.00") + "R"
+    whyTxt := f_why()
 
 if fireNow and tDir == 1
     label.new(bar_index, low, "  BUY ▲  \n" + str.tostring(tRR, "#.0") + "R · WAVE " + (tWave == 7 ? "C" : str.tostring(tWave)) + (tConf == "" ? "" : " " + tConf), style = label.style_label_up, color = cBuy, textcolor = cTxt, size = pillSz, tooltip = whyTxt)
@@ -1555,13 +1567,15 @@ if (hitTp or hitSl or hitBe or hitInv) and i_levels
         label.set_textcolor(bTp2, color.new(cMint, 65))
 
 // ── education cards ───────────────────────────────────────────────────────────────────
+f_cardHow() => label.new(bar_index + 14, hi300, "HOW TO READ THIS", style = label.style_label_left, color = color.new(cSect, 12), textcolor = cGold, size = size.small, tooltip = "HOW TO READ THIS INDICATOR\n\n1  SOLID LEGS are motive waves - larger, moving with the trend. DASHED LEGS are corrective waves - smaller, moving against it. That is the entire definition the whole model is built on.\n\n2  ①②③④⑤ is the impulse, ⒶⒷⒸ the correction that follows. Hover any of them for what that wave is, how far it went, which rule it has to respect and what its subwaves say.\n\n3  THE SMALL 5 AND 3 on each leg are the subwave verdict. A motive wave subdivides into five, a corrective wave into three - and corrections are never fives. Grey means the subdivision agrees with the label, gold means it disagrees and the count deserves a second look.\n\n4  SHADED ZONE = where the correction is expected to end. Wave 2: 50 - 61.8 % of wave 1. Wave 4: 23.6 - 50 % of wave 3.\n\n5  THE GREEN LINE marked '④ of lesser degree' is the depth guideline: fourth waves tend to bottom inside the span of the previous fourth wave one degree smaller. It is often the better target than any percentage.\n\n6  THE CHANNEL is built the way the source builds it - 1 to 3 with a parallel through 2 while wave 4 forms, then 2 to 4 with a parallel through the peak of 3 to forecast wave 5. A break of the upper line is a THROW-OVER, and that is a terminal signal.\n\n7  +FVG = a fair value gap inside the entry zone. The confluence that turns a level into a trade.\n\n8  PILL = the signal, with every reason behind it in the tooltip plus entry, stop, both targets and the R multiple.\n\n9  COUNT INVALID = a golden rule broke. The count is not weakened, it is dead. The panel already names the alternate reading and the price at which the primary one dies.\n\n10  Faded gold skeletons in the history are finished counts, frozen where they were found, so you can scroll back and study them.")
+f_cardExpect() => label.new(bar_index + 14, lo300, "BEFORE YOU TRADE THIS", style = label.style_label_left, color = color.new(cSect, 12), textcolor = cCyan, size = size.small, tooltip = "HONEST EXPECTATIONS\n\n· Elliott Wave is not a standalone technique, and its subjective nature has put a lot of traders off it. Two competent analysts label the same chart differently, and both can be inside the rules. This indicator picks ONE reading, names the most likely alternative, and tells you the exact price at which the primary reading dies. It does not pretend the ambiguity is gone - the source itself calls the whole exercise a way of ordering probabilities, not of producing certainty.\n\n· THE COUNT RE-READS ITSELF ON EVERY NEW PIVOT, and the newest pivot is only confirmed after the pivot strength has elapsed. That means labels move. Every honest Elliott tool repaints in this sense; one that never changed its mind would simply be ignoring the market. Judge a count by whether it was invalidated, not by whether it stayed still.\n\n· THE TWO PIVOT STRENGTHS DECIDE EVERYTHING. The coarse one sets the degree you are counting; the fine one decides whether a leg reads as a five or a three. If the subwave column shows nothing but dots, the finer zigzag is too coarse for this timeframe - lower it.\n\n· The percentages are averages, not laws. Corrections come in slightly smaller and slightly larger than the textbook numbers all the time. The 23.6 % wave 4 in particular is an empirical addition, not one of the ratios the original ratio analysis lists.\n\n· Wave counts cannot be backtested the way a moving average cross can, because the labelling itself is a judgement. Anything that claims a hit rate for Elliott Wave has quietly fixed one counting rule and measured that instead.\n\n· The win / loss counter is a rough on-chart tracker. It assumes a fill at the marked price and resolves target before stop inside the same bar. Break-even only protects from the bar AFTER it was reached. A trade whose count dies underneath it is closed at that bar's close and counted under INV - it does not disappear from the record. It is not a backtest and it is not a performance claim.\n\nThis indicator is a study tool. It is not financial advice.")
 var label cardA = na
 var label cardB = na
 if i_eduCard and barstate.islast
     label.delete(cardA)
     label.delete(cardB)
-    cardA := label.new(bar_index + 14, hi300, "HOW TO READ THIS", style = label.style_label_left, color = color.new(cSect, 12), textcolor = cGold, size = size.small, tooltip = "HOW TO READ THIS INDICATOR\n\n1  SOLID LEGS are motive waves - larger, moving with the trend. DASHED LEGS are corrective waves - smaller, moving against it. That is the entire definition the whole model is built on.\n\n2  ①②③④⑤ is the impulse, ⒶⒷⒸ the correction that follows. Hover any of them for what that wave is, how far it went, which rule it has to respect and what its subwaves say.\n\n3  THE SMALL 5 AND 3 on each leg are the subwave verdict. A motive wave subdivides into five, a corrective wave into three - and corrections are never fives. Grey means the subdivision agrees with the label, gold means it disagrees and the count deserves a second look.\n\n4  SHADED ZONE = where the correction is expected to end. Wave 2: 50 - 61.8 % of wave 1. Wave 4: 23.6 - 50 % of wave 3.\n\n5  THE GREEN LINE marked '④ of lesser degree' is the depth guideline: fourth waves tend to bottom inside the span of the previous fourth wave one degree smaller. It is often the better target than any percentage.\n\n6  THE CHANNEL is built the way the source builds it - 1 to 3 with a parallel through 2 while wave 4 forms, then 2 to 4 with a parallel through the peak of 3 to forecast wave 5. A break of the upper line is a THROW-OVER, and that is a terminal signal.\n\n7  +FVG = a fair value gap inside the entry zone. The confluence that turns a level into a trade.\n\n8  PILL = the signal, with every reason behind it in the tooltip plus entry, stop, both targets and the R multiple.\n\n9  COUNT INVALID = a golden rule broke. The count is not weakened, it is dead. The panel already names the alternate reading and the price at which the primary one dies.\n\n10  Faded gold skeletons in the history are finished counts, frozen where they were found, so you can scroll back and study them.")
-    cardB := label.new(bar_index + 14, lo300, "BEFORE YOU TRADE THIS", style = label.style_label_left, color = color.new(cSect, 12), textcolor = cCyan, size = size.small, tooltip = "HONEST EXPECTATIONS\n\n· Elliott Wave is not a standalone technique, and its subjective nature has put a lot of traders off it. Two competent analysts label the same chart differently, and both can be inside the rules. This indicator picks ONE reading, names the most likely alternative, and tells you the exact price at which the primary reading dies. It does not pretend the ambiguity is gone - the source itself calls the whole exercise a way of ordering probabilities, not of producing certainty.\n\n· THE COUNT RE-READS ITSELF ON EVERY NEW PIVOT, and the newest pivot is only confirmed after the pivot strength has elapsed. That means labels move. Every honest Elliott tool repaints in this sense; one that never changed its mind would simply be ignoring the market. Judge a count by whether it was invalidated, not by whether it stayed still.\n\n· THE TWO PIVOT STRENGTHS DECIDE EVERYTHING. The coarse one sets the degree you are counting; the fine one decides whether a leg reads as a five or a three. If the subwave column shows nothing but dots, the finer zigzag is too coarse for this timeframe - lower it.\n\n· The percentages are averages, not laws. Corrections come in slightly smaller and slightly larger than the textbook numbers all the time. The 23.6 % wave 4 in particular is an empirical addition, not one of the ratios the original ratio analysis lists.\n\n· Wave counts cannot be backtested the way a moving average cross can, because the labelling itself is a judgement. Anything that claims a hit rate for Elliott Wave has quietly fixed one counting rule and measured that instead.\n\n· The win / loss counter is a rough on-chart tracker. It assumes a fill at the marked price and resolves target before stop inside the same bar. Break-even only protects from the bar AFTER it was reached. A trade whose count dies underneath it is closed at that bar's close and counted under INV - it does not disappear from the record. It is not a backtest and it is not a performance claim.\n\nThis indicator is a study tool. It is not financial advice.")
+    cardA := f_cardHow()
+    cardB := f_cardExpect()
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
 //  PANEL ANIMATION TICKER
@@ -1611,11 +1625,9 @@ int  rSig      = rAfterAlt + 8
 int  rFtr      = rAfterAlt + 9
 int  panRows   = rFtr + 1
 
-var table pan = na
-if i_panOn and barstate.islast
+var table pan = i_panOn ? table.new(f_posOf(i_panPos), 8, 44, bgcolor = cPanel, frame_color = color.new(cGold, 60), frame_width = 1, border_color = color.new(cSect, 40), border_width = 1) : na
+f_drawPanel() =>
     psz = f_sizeOf(i_panSize)
-    if na(pan)
-        pan := table.new(f_posOf(i_panPos), 8, 44, bgcolor = cPanel, frame_color = color.new(cGold, 60), frame_width = 1, border_color = color.new(cSect, 40), border_width = 1)
     for r = 0 to panRows - 1
         for c = 0 to 7
             table.cell(pan, c, r, "", bgcolor = cPanel, text_size = size.tiny)
@@ -1756,6 +1768,10 @@ if i_panOn and barstate.islast
     string ftr = (na(lastSigT) ? "● LIVE  ·  webhook JSON ready" : "LAST  " + lastSigS + "  ·  " + str.format_time(lastSigT, "dd MMM HH:mm")) + "   ·   W " + str.tostring(wins) + "  L " + str.tostring(losses) + "  BE " + str.tostring(bes) + "  INV " + str.tostring(invs)
     table.cell(pan, 0, rFtr, ftr, text_color = cCyan, text_size = size.tiny, bgcolor = cPanel)
     table.merge_cells(pan, 0, rFtr, 7, rFtr)
+    0
+
+if i_panOn and barstate.islast
+    f_drawPanel()
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
 //  WEBHOOK / ALERTS
