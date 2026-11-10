@@ -7,7 +7,7 @@ description: >-
   rough task, when the team underperformed, or on request to tune it. Reads the
   harness source, diagnoses the cause, proposes minimal edits, applies the
   approved ones to the committed source, reinstalls to the global config, and
-  logs the change. Triggers: /evolve, "evolve the harness", "improve the team",
+  logs the change. Triggers: /harness-evolve, "evolve the harness", "improve the team",
   "tune the agents", "why did the team do that".
 ---
 
@@ -23,16 +23,9 @@ not a signal; "the reviewer kept flagging style and missed a null deref" is.
 
 ## Where the source lives
 
-The source of truth is the **repo** (this is where it survives a container
-reclaim), and the **global config** is an install of it:
-
-- Repo source: `skills/harness/SKILL.md`, `skills/evolve/SKILL.md`,
-  `agents/*.md` (relative to the project root).
-- Global install: `~/.claude/skills/harness/`, `~/.claude/skills/harness-evolve/`,
-  `~/.claude/agents/`.
-
-Always edit the **repo source first**, then reinstall. Editing only the global
-copy loses the change when the container is reclaimed.
+The repo (`skills/`, `agents/`) is the source of truth and `~/.claude/` is an
+install of it. Edit the repo source, then run `bash install.sh`; never edit the
+installed copy, which is lost when the container is reclaimed.
 
 ## The loop
 
@@ -61,14 +54,13 @@ a changed boundary, adding/removing an agent), confirm before applying.
 Edit the repo source. Keep changes small and reversible.
 
 ### 5. Reinstall & log
-Run `bash install.sh` (or copy the changed files to the global paths) so the
-change is live, append an entry to `CHANGELOG.md`, and — if the user wants it
+Run `bash install.sh` so the change is live, append an entry to `CHANGELOG.md`, and — if the user wants it
 persisted — commit the source and changelog.
 
 ## Guardrails (never evolve these away)
 
-- Never weaken a safety gate: "don't skip/disable tests," "confirm destructive
-  actions," "report faithfully," "confirm before push/publish" stay.
+- Never weaken or remove a quality gate in `skills/harness/SKILL.md`, or an
+  agent's boundary against skipping or weakening tests.
 - Don't add process the evidence doesn't justify. Ceremony is a cost.
 - Don't delete or gut an agent without a signal that it's the problem.
 - One change per cause; no opportunistic rewrites riding along.

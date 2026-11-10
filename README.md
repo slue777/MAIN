@@ -11,13 +11,7 @@ global Claude Code config at `~/.claude/`.
 skills/
   harness/SKILL.md     orchestration — how the conductor runs the team
   evolve/SKILL.md      self-improvement loop (installs as "harness-evolve")
-agents/
-  planner.md           plans a non-trivial task before any code
-  researcher.md        maps the codebase / gathers external facts (read-only)
-  implementer.md       writes the real, working code for a step
-  tester.md            adds & runs tests; keeps the suite honestly green
-  reviewer.md          adversarial correctness review of a diff (read-only)
-  debugger.md          roots out stubborn failures the first try missed
+agents/                one file per specialist (roster: skills/harness/SKILL.md)
 install.sh             copy the above into ~/.claude/ (skills + agents)
 CHANGELOG.md           evolve log — what the team changed about itself and why
 ```
@@ -28,8 +22,8 @@ CHANGELOG.md           evolve log — what the team changed about itself and why
 bash install.sh
 ```
 
-Installs the two skills (`harness`, `harness-evolve`) and all six agents into
-`~/.claude/`. Re-run after editing anything under `skills/` or `agents/` to push
+Installs every skill under `skills/` and every agent under `agents/` into
+`~/.claude/`. Re-run after editing, adding or deleting anything there to push
 the change live. Override the target with `CLAUDE_HOME=/path bash install.sh`.
 
 `~/.claude/` is **not** version-controlled and is wiped when a cloud container is
@@ -38,12 +32,10 @@ installed copy.
 
 ## Use
 
-- **`/harness`** (or "use the harness" / "run the team") — the conductor frames
-  the task, routes each part to the right specialist, holds the quality gates
-  (plan → implement → test → review → report), and reports what was verified.
-- **`/evolve`** (or "improve the team") — turns real signals (failed gates,
-  repeated corrections, missed scope, wasted detours) into minimal, logged edits
-  to the team's own definitions.
+- **`/harness`** (or "use the harness" / "run the team") — run a task through
+  the agent team. See `skills/harness/SKILL.md`.
+- **`/harness-evolve`** (or "improve the team") — tune the team's own
+  definitions from real signals. See `skills/evolve/SKILL.md`.
 
 ## How it works
 

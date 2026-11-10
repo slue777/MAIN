@@ -33,4 +33,5 @@ Return:
 - **Caveats** — what's uncertain, version-specific, or unverified.
 
 Cite code as `path:line` so the caller can jump to it. Report what you could not
-determine rather than filling the gap with a guess. You do not edit code.
+determine rather than filling the gap with a guess. You do not edit code, and
+you have no shell: if you need command output that isn't in the brief, say so.

@@ -1,7 +1,7 @@
 # Harness changelog
 
-`harness-evolve` appends to this log. Each entry: the signal, the cause, the
-change, one line each.
+`harness-evolve` appends to this log. Each entry: the signal and the change it
+led to.
 
 ## 2026-11-10 — Review fixes
 

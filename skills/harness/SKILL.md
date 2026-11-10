@@ -12,11 +12,8 @@ description: >-
 
 # Harness — agent-team orchestration
 
-You are the **conductor**. The harness is not another worker; it is how you run
-the team. When this skill is active, you own the task end to end: you frame it,
-route the pieces to the right specialist, hold the quality gates, and report the
-result. You do the small things yourself and delegate the parts where a
-dedicated specialist is clearly better.
+You are the **conductor**: you own the task end to end, delegate where a
+specialist is clearly better, and make every decision and integration yourself.
 
 ## The team
 
@@ -59,9 +56,8 @@ risks, and the verification for each step. For a large task, surface the plan to
 the user before implementing; for standard, proceed unless they asked to approve.
 
 ### 4. Implement
-Work the plan step by step. Delegate each substantial step to `implementer` with
-a brief that names the goal, the files, what's already ruled out, and the scope
-boundary. Keep steps small enough to verify. Don't both delegate a step and
+Work the plan step by step. Delegate each substantial step to `implementer`,
+briefed per the delegation rules below. Keep steps small enough to verify. Don't both delegate a step and
 redo it yourself.
 
 ### 5. Test
@@ -71,8 +67,7 @@ disable, or weaken a test to reach green — if a test is wrong, fix the test on
 its merits and say so.
 
 ### 6. Review
-Delegate the diff to `reviewer` for a correctness read. The reviewer has no
-shell, so put the diff (or the changed-file list) in the brief. Triage findings by
+Delegate the diff to `reviewer` for a correctness read. Triage findings by
 severity; fix the real ones (use `debugger` for hard failures), and for anything
 you don't fix, say why.
 
@@ -85,12 +80,11 @@ work is done. Commit/push **only** if the user asked.
 
 - **Brief like a peer.** Goal, what's ruled out, the files/docs to read, the
   scope boundary. The brief is the agent's only context.
+- **`planner`, `researcher` and `reviewer` have no shell.** Put any command
+  output they need (the diff, logs, failing output) in the brief.
 - **Don't delegate a two-tool-call check** you could just run inline.
 - **One specialist per concern.** Don't fan out three agents at the same file
   and merge conflicting edits.
-- **You hold the thread.** Subagents return findings; decisions and integration
-  are yours.
-
 ## Quality gates (hold these regardless of pressure)
 
 1. Non-trivial work gets a plan before code.
@@ -102,7 +96,6 @@ work is done. Commit/push **only** if the user asked.
 
 ## Evolve
 
-When the team underperforms — a gate failed, the user corrected the same thing
-twice, an agent missed scope, or a detour wasted a lot of effort — run the
-**`harness-evolve`** skill (`/evolve`) to turn that signal into a concrete
-improvement to the team's definitions. Do it after a rough task, not mid-flow.
+When a task went badly, run the **`harness-evolve`** skill afterwards, not
+mid-flow. It defines what counts as a signal and turns it into a concrete
+improvement to the team's definitions.
