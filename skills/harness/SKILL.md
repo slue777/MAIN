@@ -71,7 +71,8 @@ disable, or weaken a test to reach green — if a test is wrong, fix the test on
 its merits and say so.
 
 ### 6. Review
-Delegate the diff to `reviewer` for a correctness read. Triage findings by
+Delegate the diff to `reviewer` for a correctness read. The reviewer has no
+shell, so put the diff (or the changed-file list) in the brief. Triage findings by
 severity; fix the real ones (use `debugger` for hard failures), and for anything
 you don't fix, say why.
 

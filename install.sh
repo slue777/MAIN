@@ -22,21 +22,41 @@ echo "Installing harness from $REPO_ROOT -> $CLAUDE_DIR"
 #   skills/evolve  -> ~/.claude/skills/harness-evolve   (matches original intent)
 install_skill() {
   local src="$1" name="$2"
+  # Copy to a temp dir first, then swap, so a half-copied skill is never live.
+  local tmp="$SKILLS_DST/.$name.tmp.$$"
+  rm -rf "$tmp"
+  cp -r "$REPO_ROOT/skills/$src" "$tmp"
   rm -rf "${SKILLS_DST:?}/$name"
-  cp -r "$REPO_ROOT/skills/$src" "$SKILLS_DST/$name"
+  mv "$tmp" "$SKILLS_DST/$name"
   echo "  skill: $name"
 }
 
 install_skill harness harness
 install_skill evolve  harness-evolve
 
-# Agent team.
+# Agent team. A manifest records which agent files this script installed, so an
+# agent deleted from the repo is removed on the next install — and only files
+# this script put there are ever removed.
+MANIFEST="$CLAUDE_DIR/.harness-agents"
+if [ -f "$MANIFEST" ]; then
+  while IFS= read -r old; do
+    case "$old" in ""|*/*|.*) continue ;; esac
+    if [ ! -f "$REPO_ROOT/agents/$old" ]; then
+      rm -f "$AGENTS_DST/$old"
+      echo "  removed stale agent: ${old%.md}"
+    fi
+  done < "$MANIFEST"
+fi
+
 agent_count=0
+: > "$MANIFEST.tmp"
 for f in "$REPO_ROOT"/agents/*.md; do
   cp "$f" "$AGENTS_DST/"
+  basename "$f" >> "$MANIFEST.tmp"
   echo "  agent: $(basename "$f" .md)"
   agent_count=$((agent_count + 1))
 done
+mv "$MANIFEST.tmp" "$MANIFEST"
 
 echo "Done. Harness skills and $agent_count agents installed under $CLAUDE_DIR."
 echo "Skills:  harness, harness-evolve   (invoke with /harness, /evolve)"

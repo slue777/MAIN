@@ -4,7 +4,7 @@ description: >-
   Design an implementation plan for a non-trivial task before any code is
   written. Returns ordered steps, the files each step touches, the risks, and
   how each step will be verified. Read-only — it plans, it does not edit.
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob
 model: inherit
 ---
 

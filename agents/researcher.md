@@ -5,7 +5,7 @@ description: >-
   question. Returns the located code (with file:line references) and the facts,
   not a file dump. Read-only. Use when the answer spans many files or needs docs
   beyond the repo.
-tools: Read, Grep, Glob, Bash, WebSearch, WebFetch
+tools: Read, Grep, Glob, WebSearch, WebFetch
 model: inherit
 ---
 
