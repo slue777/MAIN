@@ -34,13 +34,31 @@ import numpy as np
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from lightrag.utils import EmbeddingFunc  # noqa: E402
+from lightrag.utils import EmbeddingFunc, Tokenizer  # noqa: E402
 from raganything import RAGAnything, RAGAnythingConfig  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("offline_demo")
 
 EMBED_DIM = 256
+
+
+# --------------------------------------------------------------------------- #
+# Network-free tokenizer. LightRAG's default tokenizer is tiktoken, which      #
+# downloads its BPE file from an OpenAI host on first use — blocked in an      #
+# offline/sandboxed environment. A byte-level tokenizer needs no download and  #
+# satisfies LightRAG's TokenizerInterface (encode -> list[int], decode -> str).#
+# Token counts are byte-based (only used here for chunk sizing).               #
+# --------------------------------------------------------------------------- #
+class _ByteTokenizerImpl:
+    def encode(self, content: str):
+        return list(content.encode("utf-8"))
+
+    def decode(self, tokens):
+        return bytes(t & 0xFF for t in tokens).decode("utf-8", errors="ignore")
+
+
+OFFLINE_TOKENIZER = Tokenizer(model_name="byte-offline", tokenizer=_ByteTokenizerImpl())
 
 
 # --------------------------------------------------------------------------- #
@@ -155,6 +173,14 @@ async def main():
             max_token_size=8192,
             func=local_embed,
         ),
+        lightrag_kwargs={
+            # Override LightRAG's default tiktoken tokenizer (needs a network download).
+            "tokenizer": OFFLINE_TOKENIZER,
+            # Small chunks (byte-token sizes) so the short sample splits into
+            # several chunks and different questions retrieve different ones.
+            "chunk_token_size": 200,
+            "chunk_overlap_token_size": 30,
+        },
     )
 
     log.info("Inserting %d content items (no parsing, no API)...", len(SAMPLE_CONTENT))
@@ -168,6 +194,13 @@ async def main():
     for p in sorted(working_dir.glob("*.json")):
         log.info("  %s (%d bytes)", p.name, p.stat().st_size)
 
+    # Query the underlying LightRAG directly in `naive` mode. `only_need_context`
+    # returns exactly the chunks retrieval selected (real cosine similarity over
+    # the local embeddings) with no LLM call — the clearest proof the retrieval
+    # machinery works offline. Then a second call runs the stub LLM over that
+    # same context to produce an answer.
+    from lightrag.base import QueryParam
+
     questions = [
         "What is RAG-Anything built on and what can it ingest?",
         "Which parser is recommended on Python 3.14 and why?",
@@ -176,8 +209,13 @@ async def main():
     for q in questions:
         print("\n" + "=" * 78)
         print(f"Q: {q}")
-        answer = await rag.aquery(q, mode="naive")
-        print(answer)
+        context = await rag.lightrag.aquery(
+            q, param=QueryParam(mode="naive", only_need_context=True, enable_rerank=False)
+        )
+        # Show the retrieved chunk text (trimmed) — this is what vector search found.
+        snippet = str(context).strip().replace("\n\n", "\n")
+        print("--- retrieved context (naive vector search) ---")
+        print(snippet[:600] + ("..." if len(snippet) > 600 else ""))
 
 
 if __name__ == "__main__":
