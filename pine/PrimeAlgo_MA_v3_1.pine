@@ -1,0 +1,600 @@
+//@version=5
+indicator(title="Prime Algorithms MA v3.1 (Mendes · Zeolla · 가격 결합 약수 엔진)", shorttitle="PrimeAlgo MA v3.1", overlay=true)
+
+// ============================================================
+// v3 변경 요약 (v2 대비)
+//  1) 가격 결합 엔진(Cycle-null): 수익률에서 정수 주기를 검출하고,
+//     SMA 길이를 그 주기의 배수로 맞춰 해당 주기 성분을 정확히 0으로 지운다.
+//     길이 N의 SMA는 N의 약수 주기를 모두 지우고, 소수 N은 어떤 주기도 지우지 않는다(대조군).
+//  2) 소수표: Mendes 쌍곡선 체(구간 체)로 첫 봉에 한 번 생성하고, Zeolla 삼각형 체와 P(n)으로 3중 교차검증.
+//  3) v2 정리: 호출되지 않던 is_prime_mendes, sq*sq 분기, 미사용 r, 도달 불가 EMA 리셋 제거.
+//     출력이 같던 쌍곡선·Zeolla 모드는 소수 모드 하나로 통합(두 체는 소수표 생성·검증에 사용).
+//  4) 쌍둥이 모드: 쌍의 아래·위 원소 모두 후보(가장 가까운 쌍둥이 소수).
+//  주의: EMA에는 정확한 소거가 없으므로 약수 엔진의 효과는 SMA에서만 성립한다.
+//
+// v3.1 수정 (v3 대비)
+//  검출기 교체: Welch 계절 ANOVA + "약수가 유의하면 배수 제외" 규칙 → 라마누잔 원시 부분공간 검정.
+//  v3의 규칙은 주기 2와 주기 6이 함께 유의하면 6을 버렸다. 그러면 길이가 2의 배수로만 맞춰져
+//  실제 주기 6 성분이 지워지지 않는다(예: 4시간봉의 24시간 주기).
+//  v3.1은 위상평균을 주기 q의 원시 성분 공간(차원 φ(q))에 사영해 그 에너지만 검정한다.
+//  이 사영은 q의 진약수 주기 성분을 모두 0으로 만들므로, 배수 제외 규칙 없이도
+//  주기 2 신호가 4·6·8…에서 다시 검출되지 않는다.
+// ============================================================
+
+// ============================================================
+// 사용자 입력 (Inputs)
+// ============================================================
+src    = input.source(close, title="기준 가격 (Source)")
+maType = input.string("SMA", title="이동평균 종류 (MA Type)", options=["SMA", "EMA"])
+
+M_CYC = "Cycle-null · 가격 결합 약수 엔진"
+M_PRI = "Prime · Mendes P(n) 최근접 소수"
+M_TWN = "Twin · Mendes T(n) 최근접 쌍둥이 소수"
+M_FIB = "Fibonacci (21, 55, 233)"
+M_CLS = "Classic (목표값 그대로)"
+
+lenMode = input.string(M_CYC, title="길이 엔진", options=[M_CYC, M_PRI, M_TWN, M_FIB, M_CLS])
+fbMode  = input.string(M_PRI, title="주기 미검출 시 대체 길이", options=[M_PRI, M_TWN, M_CLS])
+
+target_short = input.int(20,  title="단기 MA 목표 길이", minval=5,   maxval=50)
+target_mid   = input.int(60,  title="중기 MA 목표 길이", minval=30,  maxval=120)
+target_long  = input.int(200, title="장기 MA 목표 길이", minval=100, maxval=500)
+
+G_C = "가격 결합 약수 엔진 (Cycle-null)"
+winW     = input.int(252,    title="검출 창 W (봉)", minval=60, maxval=2000, group=G_C)
+qMaxIn   = input.int(30,     title="최대 검사 주기 (위상당 표본 12개 이상으로 자동 제한)", minval=2, maxval=60, group=G_C)
+alphaFam = input.float(0.01, title="가족 유의수준 α (Bonferroni)", minval=0.0001, maxval=0.2, step=0.001, group=G_C)
+recalcN  = input.int(21,     title="길이 재계산 간격 (봉)", minval=1, maxval=500, group=G_C)
+bandPct  = input.float(0.20, title="목표 대비 허용 길이 편차 ±", minval=0.0, maxval=0.5, step=0.01, group=G_C)
+showCtl  = input.bool(false, title="대조선: 최근접 소수 길이 MA 표시", group=G_C)
+
+// ============================================================
+// 상수
+// ============================================================
+NMAX = 1024
+// 위상당 표본이 12개 미만이면 위상별 분산 추정이 불안정해 검정이 과민해진다.
+QEFF = math.max(2, math.min(qMaxIn, int(math.floor(winW / 12.0))))
+
+// ============================================================
+// Mendes 홀수 바닥/천장 함수
+// ⌊x⌋* = 2⌊(x+1)/2⌋ - 1,  ⌈x⌉* = 2⌈(x-1)/2⌉ + 1
+// ============================================================
+odd_floor(float x) =>
+    2 * math.floor((x + 1.0) / 2.0) - 1
+
+odd_ceil(float x) =>
+    2 * math.ceil((x - 1.0) / 2.0) + 1
+
+// ============================================================
+// Mendes P(n): [3, √n] 구간 홀수 약수의 개수. P(n) = 0 ↔ n은 (홀수) 소수
+// ============================================================
+primality_P(int n) =>
+    if n < 3 or n % 2 == 0
+        n == 2 ? 0 : 1
+    else
+        int upper = int(odd_floor(math.sqrt(float(n))))
+        float sum_val = 0.0
+        int i = 3
+        while i <= upper
+            float q = float(n) / float(i)
+            sum_val += (odd_ceil(q) - odd_floor(q))
+            i += 2
+        math.round(-0.5 * sum_val + 0.5 * (float(upper) - 1.0))
+
+// Mendes T(n) = P(n) + P(n+2): T(n) = 0 ↔ (n, n+2) 쌍둥이 소수 (n이 아래 원소)
+twin_prime_T(int n) =>
+    n < 3 or n % 2 == 0 ? 1 : primality_P(n) + primality_P(n + 2)
+
+// ============================================================
+// Mendes 쌍곡선 체 (구간 [a, b])
+// 직선 x = 3, y = x 와 쌍곡선 xy = a, xy = b 사이의 홀수 격자점 (x, y)가 곧 홀수 합성수 xy
+// ============================================================
+sieve_hyperbola(int a, int b) =>
+    bool[] t = array.new_bool(b + 1, false)
+    if b >= 2
+        array.set(t, 2, true)
+    if b >= 3
+        for n = 3 to b by 2
+            array.set(t, n, true)
+    int x = 3
+    while x * x <= b
+        int y = math.max(x, odd_ceil(float(a) / float(x)))
+        int yEnd = odd_floor(float(b) / float(x))
+        while y <= yEnd
+            array.set(t, x * y, false)
+            y += 2
+        x += 2
+    t
+
+// ============================================================
+// Zeolla 삼각형 체: 6n±1의 인덱스 n에서 합성수 인덱스를 네 삼각형 식으로 제외
+//  6n+1 합성: n = 6ab + a + b  ((6a+1)(6b+1)),  n = 6ab - a - b  ((6a-1)(6b-1)),  a ≤ b
+//  6n-1 합성: n = 6ab - a + b  ((6a+1)(6b-1)),  a, b ≥ 1
+// ============================================================
+sieve_zeolla(int nmax) =>
+    bool[] t = array.new_bool(nmax + 1, false)
+    if nmax >= 2
+        array.set(t, 2, true)
+    if nmax >= 3
+        array.set(t, 3, true)
+    int nlim = int(math.floor((nmax + 1) / 6.0)) + 1
+    bool[] plus  = array.new_bool(nlim + 1, true)
+    bool[] minus = array.new_bool(nlim + 1, true)
+    int a = 1
+    while (6 * a - 1) * (6 * a - 1) <= nmax
+        int b = a
+        bool go = true
+        while go
+            int n1 = 6 * a * b + a + b
+            int n2 = 6 * a * b - a - b
+            go := false
+            if 6 * n1 + 1 <= nmax
+                array.set(plus, n1, false)
+                go := true
+            if 6 * n2 + 1 <= nmax
+                array.set(plus, n2, false)
+                go := true
+            b += 1
+        a += 1
+    a := 1
+    while (6 * a + 1) * 5 <= nmax
+        int b = 1
+        while 6 * (6 * a * b - a + b) - 1 <= nmax
+            array.set(minus, 6 * a * b - a + b, false)
+            b += 1
+        a += 1
+    for n = 1 to nlim
+        if 6 * n - 1 <= nmax
+            if array.get(minus, n)
+                array.set(t, 6 * n - 1, true)
+        if 6 * n + 1 <= nmax
+            if array.get(plus, n)
+                array.set(t, 6 * n + 1, true)
+    t
+
+// ============================================================
+// 소수표 (첫 봉에 한 번 생성) + 3중 교차검증
+// ============================================================
+var bool[] PT = sieve_hyperbola(3, NMAX)
+var int sieveMismatch = -1
+if barstate.isfirst
+    bool[] zt = sieve_zeolla(NMAX)
+    int mm = 0
+    for n = 0 to NMAX
+        bool byP = n == 2 ? true : (n >= 3 and n % 2 == 1 ? primality_P(n) == 0 : false)
+        bool h = array.get(PT, n)
+        if h != array.get(zt, n) or h != byP
+            mm += 1
+    sieveMismatch := mm
+
+isP(int n) =>
+    n >= 0 and n <= NMAX ? array.get(PT, n) : false
+
+isTwinMember(int n) =>
+    isP(n) and (isP(n + 2) or isP(n - 2))
+
+nearest_prime(int T) =>
+    int res = T
+    bool found = false
+    int d = 0
+    while not found and d <= NMAX
+        if T - d >= 2 and isP(T - d)
+            res := T - d
+            found := true
+        else if isP(T + d)
+            res := T + d
+            found := true
+        d += 1
+    res
+
+nearest_twin(int T) =>
+    int res = T
+    bool found = false
+    int d = 0
+    while not found and d <= NMAX
+        if T - d >= 2 and isTwinMember(T - d)
+            res := T - d
+            found := true
+        else if isTwinMember(T + d)
+            res := T + d
+            found := true
+        d += 1
+    res
+
+fallback_len(int T) =>
+    fbMode == M_PRI ? nearest_prime(T) : fbMode == M_TWN ? nearest_twin(T) : T
+
+static_len(int T, int fibVal) =>
+    lenMode == M_PRI ? nearest_prime(T) : lenMode == M_TWN ? nearest_twin(T) : lenMode == M_FIB ? fibVal : T
+
+// ============================================================
+// 가격 결합 계층: 위상별 누적(S, SS, C)을 창 W 안에서 증분 갱신
+// 주기 q의 위상 g = (봉 인덱스) mod q.  배열 위치 = qOff(q) + g
+// ============================================================
+qOff(int q) =>
+    int(math.floor((q - 1) * q / 2.0)) - 1
+
+TOT = qOff(QEFF + 1)
+var float[] cS    = array.new_float(TOT, 0.0)
+var float[] cSS   = array.new_float(TOT, 0.0)
+var float[] cC    = array.new_float(TOT, 0.0)
+var float[] fifoV = array.new_float(0)
+var int[]   fifoI = array.new_int(0)
+var float[] zAll  = array.new_float(QEFF + 1, 0.0)
+var int[]   primQ = array.new_int(0)
+var float[] primZ = array.new_float(0)
+var int[]   hitCount = array.new_int(QEFF + 1, 0)
+
+// ============================================================
+// 라마누잔 합 c_q(k) = Σ_{d | gcd(k, q)} μ(q/d)·d  (첫 봉에 한 번 생성)
+// 배열 위치 = qOff(q) + (k mod q).  c_q(0) = φ(q)
+// ============================================================
+mobius(int n0) =>
+    int n = n0
+    int m = 1
+    int p = 2
+    while p * p <= n
+        if n % p == 0
+            n := int(n / p)
+            if n % p == 0
+                m := 0
+                n := 1
+            else
+                m := -m
+        p += 1
+    m != 0 and n > 1 ? -m : m
+
+var int[] RC = array.new_int(TOT, 0)
+if barstate.isfirst
+    for q = 2 to QEFF
+        int rb = qOff(q)
+        for d = 1 to q
+            if q % d == 0
+                int mu = mobius(int(q / d))
+                if mu != 0
+                    for k = 0 to q - 1
+                        if k % d == 0
+                            array.set(RC, rb + k, array.get(RC, rb + k) + mu * d)
+
+// 인과성: 직전 봉 수익률만 반영 → 현재 봉의 미확정 종가는 길이 결정에 쓰이지 않음 (리페인트 없음)
+bool okR = bar_index >= 2 and not na(src[1]) and not na(src[2]) and src[1] > 0 and src[2] > 0
+if okR
+    float r1 = math.log(src[1] / src[2])
+    int i1 = bar_index - 1
+    for q = 2 to QEFF
+        int k = qOff(q) + i1 % q
+        array.set(cS,  k, array.get(cS,  k) + r1)
+        array.set(cSS, k, array.get(cSS, k) + r1 * r1)
+        array.set(cC,  k, array.get(cC,  k) + 1.0)
+    array.push(fifoV, r1)
+    array.push(fifoI, i1)
+    if array.size(fifoV) > winW
+        float r0 = array.shift(fifoV)
+        int i0 = array.shift(fifoI)
+        for q = 2 to QEFF
+            int k0 = qOff(q) + i0 % q
+            array.set(cS,  k0, array.get(cS,  k0) - r0)
+            array.set(cSS, k0, array.get(cSS, k0) - r0 * r0)
+            array.set(cC,  k0, array.get(cC,  k0) - 1.0)
+
+// Paulson 근사: F(d1, d2) → 표준정규 z
+paulson_z(float F, float d1, float d2) =>
+    float a = 2.0 / (9.0 * d1)
+    float b = 2.0 / (9.0 * d2)
+    float f3 = math.pow(F, 1.0 / 3.0)
+    ((1.0 - b) * f3 - (1.0 - a)) / math.sqrt(a + b * f3 * f3)
+
+// 표준정규 위꼬리 역함수 (Abramowitz–Stegun 26.2.23, 오차 < 4.5e-4)
+z_upper(float p) =>
+    float t = math.sqrt(-2.0 * math.log(p))
+    t - (2.515517 + 0.802853 * t + 0.010328 * t * t) / (1.0 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t)
+
+// 원시 부분공간 검정: 주기 q의 위상평균 m을 원시 성분 공간에 사영한 u = P·m, P[g,h] = c_q(g−h)/q
+//  T = Σ u², 귀무가설에서 E[T] = (φ(q)/q)·Σe, Var[T] = 2·ΣΣ P[g,h]²·e_g·e_h  (e_g = 위상평균의 분산 추정)
+//  Satterthwaite로 분자 자유도 ν = 2E²/Var, 분모 자유도 = (Σe)² / Σ(e²/(n−1)) → Paulson z
+//  위상별 분산이 달라도 유효하고, q의 진약수 주기 성분에는 반응하지 않는다.
+prim_z(int q) =>
+    int base = qOff(q)
+    float[] m = array.new_float(q, 0.0)
+    float[] e = array.new_float(q, 0.0)
+    bool ok = true
+    float eSum = 0.0
+    float eDf = 0.0
+    for g = 0 to q - 1
+        float n = array.get(cC, base + g)
+        float s = array.get(cS, base + g)
+        float v = n >= 2.0 ? (array.get(cSS, base + g) - s * s / n) / (n - 1.0) : 0.0
+        if n < 2.0 or v <= 0.0
+            ok := false
+        else
+            float eg = v / n
+            array.set(m, g, s / n)
+            array.set(e, g, eg)
+            eSum += eg
+            eDf += eg * eg / (n - 1.0)
+    float z = 0.0
+    if ok
+        float T = 0.0
+        float V = 0.0
+        for g = 0 to q - 1
+            float u = 0.0
+            float vg = 0.0
+            for h = 0 to q - 1
+                int k = (g - h) % q
+                k := k < 0 ? k + q : k
+                float c = array.get(RC, base + k)
+                u += c * array.get(m, h)
+                vg += c * c * array.get(e, h)
+            T += math.pow(u / q, 2)
+            V += array.get(e, g) * vg
+        V := 2.0 * V / (q * q)
+        float E = array.get(RC, base) * eSum / q
+        if E > 0.0 and V > 0.0 and eDf > 0.0
+            z := paulson_z(T / E, 2.0 * E * E / V, eSum * eSum / eDf)
+    z
+
+// 원시 성분이 유의한 주기를 모두 남김 (약수 주기 성분은 사영에서 이미 제거됨)
+detect_primitives() =>
+    float zc = z_upper(alphaFam / math.max(1.0, QEFF - 1.0))
+    array.clear(primQ)
+    array.clear(primZ)
+    for q = 2 to QEFF
+        float zq = prim_z(q)
+        array.set(zAll, q, zq)
+        if zq > zc
+            array.push(primQ, q)
+            array.push(primZ, zq)
+    zc
+
+// 약수 소거 길이: 목표 ±band 안에서 '나눠떨어지는 원시 주기들의 z 합'이 최대인 N (동률이면 목표에 가까운 쪽, 그다음 짧은 쪽)
+cycle_len(int T) =>
+    int lo = math.max(2, math.round(T * (1.0 - bandPct)))
+    int hi = math.min(NMAX - 2, math.round(T * (1.0 + bandPct)))
+    int best = -1
+    float bestS = 0.0
+    int bestD = 1000000
+    int m = array.size(primQ)
+    if m > 0
+        for N = lo to hi
+            float sc = 0.0
+            for j = 0 to m - 1
+                if N % array.get(primQ, j) == 0
+                    sc += array.get(primZ, j)
+            int d = math.abs(N - T)
+            if sc > bestS + 1e-9 or (sc > 0.0 and math.abs(sc - bestS) <= 1e-9 and d < bestD)
+                best := N
+                bestS := sc
+                bestD := d
+    best > 0 ? best : fallback_len(T)
+
+// 위상 수준 프로파일에 SMA(N)을 걸었을 때 남는 주기 q 성분의 RMS 비율 (q | N 이면 0)
+leak_ratio(int q, int N) =>
+    int base = qOff(q)
+    float nTot = 0.0
+    float sTot = 0.0
+    for g = 0 to q - 1
+        nTot += array.get(cC, base + g)
+        sTot += array.get(cS, base + g)
+    float gm = nTot > 0 ? sTot / nTot : 0.0
+    float[] L = array.new_float(q, 0.0)
+    float acc = 0.0
+    for g = 0 to q - 1
+        float cg = array.get(cC, base + g)
+        acc += cg > 0 ? array.get(cS, base + g) / cg - gm : 0.0
+        array.set(L, g, acc)
+    float mL = array.avg(L)
+    float den = 0.0
+    for g = 0 to q - 1
+        den += math.pow(array.get(L, g) - mL, 2)
+    den := math.sqrt(den / q)
+    float res = 0.0
+    if den > 0
+        float[] outA = array.new_float(q, 0.0)
+        for ph = 0 to q - 1
+            float sm = 0.0
+            for k = 0 to N - 1
+                int j = (ph - k) % q
+                j := j < 0 ? j + q : j
+                sm += array.get(L, j) - mL
+            array.set(outA, ph, sm / N)
+        float mo = array.avg(outA)
+        float num = 0.0
+        for ph = 0 to q - 1
+            num += math.pow(array.get(outA, ph) - mo, 2)
+        res := math.sqrt(num / q) / den
+    res
+
+// ============================================================
+// 길이 결정
+// ============================================================
+bool isCycle = lenMode == M_CYC
+bool ready = array.size(fifoV) >= winW
+
+var int lenS = na
+var int lenM = na
+var int lenL = na
+var bool everReady = false
+var int nRecalc = 0
+var int nHit = 0
+var float zcShow = na
+
+if barstate.isfirst
+    lenS := isCycle ? fallback_len(target_short) : static_len(target_short, 21)
+    lenM := isCycle ? fallback_len(target_mid)   : static_len(target_mid,   55)
+    lenL := isCycle ? fallback_len(target_long)  : static_len(target_long, 233)
+
+// 검출은 모든 모드에서 돌려 진단에 쓰고, 길이는 Cycle-null 모드에서만 바꾼다
+if ready and (not everReady or bar_index % recalcN == 0)
+    zcShow := detect_primitives()
+    everReady := true
+    nRecalc += 1
+    if array.size(primQ) > 0
+        nHit += 1
+        for j = 0 to array.size(primQ) - 1
+            int qj = array.get(primQ, j)
+            array.set(hitCount, qj, array.get(hitCount, qj) + 1)
+    if isCycle
+        lenS := cycle_len(target_short)
+        lenM := cycle_len(target_mid)
+        lenL := cycle_len(target_long)
+
+// 대조군: 최근접 소수 길이 (어떤 정수 주기도 정확히 지우지 않음)
+var int ctlS = nearest_prime(target_short)
+var int ctlM = nearest_prime(target_mid)
+var int ctlL = nearest_prime(target_long)
+
+// ============================================================
+// 이동평균: SMA는 누적합으로 O(1) (길이가 봉마다 바뀌어도 정확), EMA는 길이별 α로 연속 갱신
+// ============================================================
+var float csum = 0.0
+csum += nz(src)
+max_bars_back(csum, 1100)
+
+float smaS = bar_index >= lenS - 1 ? (csum - nz(csum[lenS])) / lenS : na
+float smaM = bar_index >= lenM - 1 ? (csum - nz(csum[lenM])) / lenM : na
+float smaL = bar_index >= lenL - 1 ? (csum - nz(csum[lenL])) / lenL : na
+float sctS = bar_index >= ctlS - 1 ? (csum - nz(csum[ctlS])) / ctlS : na
+float sctM = bar_index >= ctlM - 1 ? (csum - nz(csum[ctlM])) / ctlM : na
+float sctL = bar_index >= ctlL - 1 ? (csum - nz(csum[ctlL])) / ctlL : na
+
+ema_dyn(float x, int N) =>
+    var float e = na
+    var float sSum = 0.0
+    var int sCnt = 0
+    if not na(x)
+        if na(e)
+            sSum += x
+            sCnt += 1
+            if sCnt >= N
+                e := sSum / sCnt
+        else
+            float a = 2.0 / (N + 1.0)
+            e := a * x + (1.0 - a) * e
+    e
+
+float emaS = ema_dyn(src, lenS)
+float emaM = ema_dyn(src, lenM)
+float emaL = ema_dyn(src, lenL)
+float ectS = ema_dyn(src, ctlS)
+float ectM = ema_dyn(src, ctlM)
+float ectL = ema_dyn(src, ctlL)
+
+bool useEma = maType == "EMA"
+float ma_short = useEma ? emaS : smaS
+float ma_mid   = useEma ? emaM : smaM
+float ma_long  = useEma ? emaL : smaL
+
+// ============================================================
+// 차트 출력
+// ============================================================
+plot(ma_short, color=color.rgb(243, 193, 15), title="Short MA", linewidth=2)
+plot(ma_mid,   color=color.rgb(255, 60, 0),   title="Mid MA",   linewidth=2)
+plot(ma_long,  color=color.rgb(156, 39, 176), title="Long MA",  linewidth=3)
+plot(showCtl ? (useEma ? ectS : sctS) : na, color=color.new(color.rgb(243, 193, 15), 45), title="대조 Short (소수 길이)", style=plot.style_circles, linewidth=1)
+plot(showCtl ? (useEma ? ectM : sctM) : na, color=color.new(color.rgb(255, 60, 0), 45),   title="대조 Mid (소수 길이)",   style=plot.style_circles, linewidth=1)
+plot(showCtl ? (useEma ? ectL : sctL) : na, color=color.new(color.rgb(156, 39, 176), 45), title="대조 Long (소수 길이)",  style=plot.style_circles, linewidth=1)
+
+bool lenChanged = isCycle and bar_index > 0 and (lenS != lenS[1] or lenM != lenM[1] or lenL != lenL[1])
+plotshape(lenChanged, title="길이 변경", style=shape.diamond, location=location.bottom, size=size.tiny, color=color.aqua)
+alertcondition(lenChanged, title="길이 변경", message="PrimeAlgo MA v3.1: 약수 엔진이 MA 길이를 바꿨습니다")
+
+// ============================================================
+// 정보 테이블 (마지막 봉)
+// ============================================================
+div_list(int N) =>
+    string s = ""
+    int cnt = 0
+    for d = 2 to math.min(N, QEFF)
+        if N % d == 0
+            s := s + (cnt > 0 ? "," : "") + str.tostring(d)
+            cnt += 1
+    cnt == 0 ? "없음" : s
+
+prime_label(int N) =>
+    string s = isP(N) ? "소수" : "합성"
+    if isP(N)
+        if twin_prime_T(N) == 0
+            s := s + " · 쌍둥이(아래)"
+        else if N >= 5 and twin_prime_T(N - 2) == 0
+            s := s + " · 쌍둥이(위)"
+    s
+
+leak_cell(int N, int ctl) =>
+    string s = "—"
+    if array.size(primQ) > 0
+        int qs = array.get(primQ, 0)
+        float zb = array.get(primZ, 0)
+        if array.size(primQ) > 1
+            for j = 1 to array.size(primQ) - 1
+                if array.get(primZ, j) > zb
+                    zb := array.get(primZ, j)
+                    qs := array.get(primQ, j)
+        s := "q" + str.tostring(qs) + " " + str.tostring(leak_ratio(qs, N) * 100, "0.0") + "% | 소수" + str.tostring(ctl) + " " + str.tostring(leak_ratio(qs, ctl) * 100, "0.0") + "%"
+    s
+
+var table infoTable = table.new(position.top_right, 4, 9, bgcolor=color.new(color.black, 80), border_width=1)
+var bool merged = false
+
+if barstate.islast
+    color cS_ = color.rgb(243, 193, 15)
+    color cM_ = color.rgb(255, 60, 0)
+    color cL_ = color.rgb(156, 39, 176)
+    table.cell(infoTable, 0, 0, "길이 엔진", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, "Short", text_color=cS_, text_size=size.small)
+    table.cell(infoTable, 2, 0, "Mid",   text_color=cM_, text_size=size.small)
+    table.cell(infoTable, 3, 0, "Long",  text_color=cL_, text_size=size.small)
+
+    table.cell(infoTable, 0, 1, lenMode, text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(lenS), text_color=cS_, text_size=size.small)
+    table.cell(infoTable, 2, 1, str.tostring(lenM), text_color=cM_, text_size=size.small)
+    table.cell(infoTable, 3, 1, str.tostring(lenL), text_color=cL_, text_size=size.small)
+
+    table.cell(infoTable, 0, 2, "소수 판정", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 2, prime_label(lenS), text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 2, 2, prime_label(lenM), text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 3, 2, prime_label(lenL), text_color=color.white, text_size=size.tiny)
+
+    table.cell(infoTable, 0, 3, "SMA가 지우는 주기 ≤" + str.tostring(QEFF), text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, div_list(lenS), text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 2, 3, div_list(lenM), text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 3, 3, div_list(lenL), text_color=color.white, text_size=size.tiny)
+
+    table.cell(infoTable, 0, 4, "최강 주기 잔류 (선택 | 소수)", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 4, leak_cell(lenS, ctlS), text_color=color.aqua, text_size=size.tiny)
+    table.cell(infoTable, 2, 4, leak_cell(lenM, ctlM), text_color=color.aqua, text_size=size.tiny)
+    table.cell(infoTable, 3, 4, leak_cell(lenL, ctlL), text_color=color.aqua, text_size=size.tiny)
+
+    string detTxt = ""
+    if not everReady
+        detTxt := "준비 중 " + str.tostring(array.size(fifoV)) + "/" + str.tostring(winW) + "봉"
+    else if array.size(primQ) == 0
+        detTxt := "유의한 주기 없음 (q 2–" + str.tostring(QEFF) + ", 임계 z " + str.tostring(zcShow, "0.00") + ") → 대체 길이"
+    else
+        for j = 0 to array.size(primQ) - 1
+            detTxt := detTxt + (j > 0 ? " · " : "") + str.tostring(array.get(primQ, j)) + "봉 (z " + str.tostring(array.get(primZ, j), "0.0") + ")"
+    table.cell(infoTable, 0, 5, "검출 원시 주기", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 5, detTxt, text_color=color.white, text_size=size.tiny)
+
+    int topQ = -1
+    int topC = 0
+    for q = 2 to QEFF
+        if array.get(hitCount, q) > topC
+            topC := array.get(hitCount, q)
+            topQ := q
+    string rateTxt = str.tostring(nHit) + "/" + str.tostring(nRecalc) + " 재계산 (우연 기대 ≤ " + str.tostring(alphaFam * 100, "0.#") + "%)" + (topQ > 0 ? " · 최다 " + str.tostring(topQ) + "봉 " + str.tostring(topC) + "회" : "")
+    table.cell(infoTable, 0, 6, "검출률 (반증 지표)", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 6, rateTxt, text_color=color.white, text_size=size.tiny)
+
+    string sieveTxt = sieveMismatch == 0 ? "쌍곡선 체 = Zeolla 삼각형 체 = P(n) ✓ (n ≤ " + str.tostring(NMAX) + ")" : "소수표 불일치 " + str.tostring(sieveMismatch) + "건"
+    table.cell(infoTable, 0, 7, "소수표 검증", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 7, sieveTxt, text_color=sieveMismatch == 0 ? color.lime : color.red, text_size=size.tiny)
+
+    string noteTxt = useEma ? "EMA에는 정확한 소거가 없어 약수 엔진의 효과가 없음 (SMA에서만 유효)" : "SMA(N)은 N의 약수 주기를 정확히 0으로 지움 · 소수 N은 지우는 주기 없음"
+    table.cell(infoTable, 0, 8, "기제", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 8, noteTxt, text_color=useEma ? color.orange : color.white, text_size=size.tiny)
+    if not merged
+        table.merge_cells(infoTable, 1, 5, 3, 5)
+        table.merge_cells(infoTable, 1, 6, 3, 6)
+        table.merge_cells(infoTable, 1, 7, 3, 7)
+        table.merge_cells(infoTable, 1, 8, 3, 8)
+        merged := true

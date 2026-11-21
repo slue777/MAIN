@@ -1,0 +1,143 @@
+//@version=5
+indicator(title="Mangoldt D̃ Panel (폰 망골트 필터 · 설계 제안서 v1.1)", shorttitle="Mangoldt D̃", overlay=false, precision=4)
+
+// ============================================================
+// 설계 제안서 v1.1 ③·⑦의 TradingView 표시
+//  x[t] = |ln(close[t] / close[t−1])|
+//  F[t] = Σ w[j]·x[t−j],  w[j] = Λ(j+1)/ψ(n),  j = 0..n−1  (j = 0이 현재 봉, w[0] = 0)
+//  S[t] = 최근 n개 x의 단순평균
+//  D̃[t] = (F[t] − S[t]) / S[t]   (S = 0이면 결측)
+// 대조용으로 바퀴 커널(W)을 고를 수 있다: 6과 서로소인 k ≥ 5 전부에 ln k (소수 판정 없음).
+// n개의 수익률이 끊김 없이 쌓이기 전에는 결측으로 표시한다.
+// 이 지표는 과거 변동의 시차별 집중도를 보여 주는 관찰 도구이며, 예측 우위는 검증되지 않았다.
+// ============================================================
+
+K_MAN = "폰 망골트 Λ"
+K_WHL = "바퀴 W (6과 서로소 · 대조)"
+
+src      = input.source(close, title="기준 가격 (Source)")
+nLen     = input.int(64, title="창 길이 n (봉)", minval=8, maxval=256)
+kernelIn = input.string(K_MAN, title="커널", options=[K_MAN, K_WHL])
+splitGap = input.bool(true, title="누락 봉에서 창 분리 (24시간 시장용 · 세션 시장에서는 끄기)")
+showAdj  = input.bool(true, title="슬롯 평균을 뺀 D̃ 표시 (일중 봉만)")
+showTbl  = input.bool(true, title="커널 검산 표 표시")
+
+// ============================================================
+// 커널 (첫 봉에 한 번 생성). 배열 위치 = 시차 j, 값 = 정규화된 가중치
+// ============================================================
+build_weights(int n, bool wheel) =>
+    float[] raw = array.new_float(n, 0.0)
+    for p = 2 to n
+        bool isPrime = true
+        int d = 2
+        while d * d <= p and isPrime
+            if p % d == 0
+                isPrime := false
+            d += 1
+        if isPrime
+            int k = p
+            while k <= n
+                array.set(raw, k - 1, math.log(p))
+                k *= p
+    if wheel
+        for k = 5 to n
+            if k % 2 != 0 and k % 3 != 0
+                array.set(raw, k - 1, math.log(k))
+    float tot = array.sum(raw)
+    for i = 0 to n - 1
+        array.set(raw, i, array.get(raw, i) / tot)
+    raw
+
+var float[] W = build_weights(nLen, kernelIn == K_WHL)
+
+// ============================================================
+// 입력 계열과 창 연속성
+// ============================================================
+float x = src > 0 and src[1] > 0 ? math.abs(math.log(src / src[1])) : na
+max_bars_back(x, 300)
+
+int barMs = timeframe.in_seconds() * 1000
+// 봉 길이가 일정한 일중 봉에서만 누락을 판정한다 (일·주·월봉은 달력 간격이 일정하지 않다)
+bool gap = bar_index > 0 and splitGap and timeframe.isintraday and time - time[1] != barMs
+// 끊김 없이 이어진 유효 수익률의 개수. 누락 봉 직후의 수익률은 창에 넣지 않는다.
+var int run = 0
+run := na(x) or gap ? 0 : run + 1
+bool ready = run >= nLen
+
+// ============================================================
+// F, S, D̃
+// ============================================================
+float F = na
+float S = na
+if ready
+    float accW = 0.0
+    float accS = 0.0
+    for j = 0 to nLen - 1
+        float xj = x[j]
+        accW += array.get(W, j) * xj
+        accS += xj
+    F := accW
+    S := accS / nLen
+float D = F - S
+float Dt = S > 0 ? D / S : na
+
+// ============================================================
+// 슬롯 평균 보정: 같은 슬롯의 과거 D̃ 평균(현재 봉 제외)을 뺀다
+// 슬롯 = UTC 봉 시작 시각의 하루 중 순번 (4시간봉이면 0–5)
+// ============================================================
+int MS_DAY = 86400000
+bool slotOk = timeframe.isintraday and barMs > 0 and MS_DAY % barMs == 0
+int nSlot = slotOk ? int(MS_DAY / barMs) : 1
+int slot = slotOk ? int((time % MS_DAY) / barMs) : 0
+var float[] slotSum = array.new_float(nSlot, 0.0)
+var int[]   slotCnt = array.new_int(nSlot, 0)
+
+float slotMean = na
+float DtAdj = na
+int cntPrev = array.get(slotCnt, slot)
+if cntPrev > 0
+    slotMean := array.get(slotSum, slot) / cntPrev
+if not na(Dt) and not na(slotMean)
+    DtAdj := Dt - slotMean
+// 확정봉의 값만 누적한다 (실시간 봉의 미확정 값이 평균에 섞이지 않게)
+if barstate.isconfirmed and not na(Dt)
+    array.set(slotSum, slot, array.get(slotSum, slot) + Dt)
+    array.set(slotCnt, slot, cntPrev + 1)
+
+// ============================================================
+// 출력
+// ============================================================
+hline(0, title="0선", color=color.gray, linestyle=hline.style_dashed)
+plot(Dt, title="D̃ = (F − S) / S", color=color.rgb(243, 193, 15), linewidth=2)
+plot(showAdj and slotOk ? DtAdj : na, title="D̃ − 슬롯 평균", color=color.aqua, linewidth=1)
+plot(F, title="F (가중평균)", color=color.new(color.orange, 30), display=display.data_window)
+plot(S, title="S (단순평균)", color=color.new(color.gray, 30), display=display.data_window)
+plot(slotOk ? slot : na, title="슬롯", color=color.gray, display=display.data_window)
+
+// ============================================================
+// 커널 검산 표: Python 구현과 대조할 값 (n = 64 폰 망골트: 27개 · 32.01봉 · 20.85)
+// ============================================================
+var table tbl = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast and showTbl
+    int pos = 0
+    float cen = 0.0
+    float sq = 0.0
+    float dayShare = 0.0
+    for j = 0 to nLen - 1
+        float wj = array.get(W, j)
+        if wj > 0
+            pos += 1
+        cen += j * wj
+        sq += wj * wj
+        if j % 6 == 0 or j % 6 == 4
+            dayShare += wj
+    table.cell(tbl, 0, 0, "커널", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 0, kernelIn + " · n " + str.tostring(nLen), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 1, "양수 가중치 수", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 1, str.tostring(pos), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 2, "무게중심 시차", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 2, str.tostring(cen, "0.00") + "봉", text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 3, "유효 표본 수", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 3, str.tostring(1.0 / sq, "0.00"), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 4, "시차 mod 6 ∈ {0, 4} 비중", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 4, str.tostring(dayShare * 100, "0.0") + "%", text_color=color.orange, text_size=size.tiny)
