@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "skills": {
+    "open-code-review": {
+      "source": "alibaba/open-code-review",
+      "commit": "e74f2c6bd4422bd1e12d257d1725bcce1d6b9ddd",
+      "sourceType": "github",
+      "skillPath": "skills/open-code-review/SKILL.md",
+      "computedHash": "8e4757c648bf3e4b6df421863398922787955922bf9c8b7baa2a4864c51fea43"
+    },
+    "open-code-review-delegate": {
+      "source": "alibaba/open-code-review",
+      "commit": "e74f2c6bd4422bd1e12d257d1725bcce1d6b9ddd",
+      "sourceType": "github",
+      "skillPath": "skills/open-code-review-delegate/SKILL.md",
+      "computedHash": "d3e445be2d49015039f3f03a304baa2816f6d8ed83afff635e240b0ba8b68861"
+    }
+  }
+}
